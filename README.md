@@ -55,17 +55,58 @@ curl localhost:8080/api/v1/links/go-ctx/stats -H "Authorization: Bearer $KEY"
 ```
 
 Interactive API docs are at <http://localhost:8080/docs>, metrics at
-`/metrics`, health at `/healthz` and `/readyz`.
+`/metrics`, health at `/healthz` and `/readyz`. `make help` lists every target.
 
-`make help` lists every target. If port 8080 is taken, `API_PORT=18080 make up`.
+### Running it locally
 
-To develop against the containers without rebuilding the image:
+Docker for the dependencies, `go run` for the service — a code change takes a
+restart instead of an image build.
 
 ```bash
 make deps-up             # just postgres + redis
-cp .env.example .env
+cp .env.example .env     # the Makefile exports this into `make run`
 make run
 ```
+
+`.env` is not read by Go itself; the Makefile loads it and puts it in the
+environment of every target. Anything already set in your shell wins over the
+file, so a one-off override needs no editing:
+
+```bash
+HTTP_ADDR=:8090 BASE_URL=http://localhost:8090 make run
+```
+
+### When port 8080 is taken
+
+Both stacks default to 8080, which is a popular port. Find the squatter and
+pick another:
+
+```bash
+lsof -nP -iTCP:8080 -sTCP:LISTEN        # who has it
+docker ps --format '{{.Names}}\t{{.Ports}}'   # often another project's container
+
+API_PORT=18080 make up                  # the Docker stack elsewhere
+HTTP_ADDR=:8090 make run                # the local process elsewhere
+```
+
+The service refuses to start rather than half-work, and says exactly what
+failed:
+
+```
+fatal: http server: listen on :8080: bind: address already in use
+```
+
+### Other startup failures
+
+| Message | Cause | Fix |
+|---|---|---|
+| `IP_HASH_SALT must be set` | no `.env`, and the salt has no default on purpose | `cp .env.example .env` |
+| `postgres: ping: ... connection refused` | dependencies are not up | `make deps-up` |
+| `Cannot connect to the Docker daemon` | Docker Desktop is not running | start Docker, wait for the whale |
+| `failed to set up container networking ... port is already allocated` | 8080 taken by another container | `API_PORT=18080 make up` |
+
+Configuration is validated at startup and reports **every** problem at once, so
+a misconfigured deployment does not fail one variable per restart.
 
 ---
 

@@ -150,8 +150,23 @@ func run() error {
 	group, groupCtx := errgroup.WithContext(ctx)
 
 	group.Go(func() error {
-		log.Info("http server listening", slog.String("addr", server.Addr))
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		// Bind first, then announce. ListenAndServe would have this the other
+		// way round: the log would claim the server is listening a moment
+		// before the bind fails, which reads as a contradiction in the logs of
+		// the one situation where they matter most.
+		// ListenConfig rather than net.Listen so that a shutdown signal during
+		// a slow DNS or bind aborts startup instead of being noticed only
+		// afterwards.
+		var lc net.ListenConfig
+		listener, err := lc.Listen(ctx, "tcp", server.Addr)
+		if err != nil {
+			return fmt.Errorf("http server: listen on %s: %w", server.Addr, err)
+		}
+
+		// The resolved address, so a port of :0 reports the one actually taken.
+		log.Info("http server listening", slog.String("addr", listener.Addr().String()))
+
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("http server: %w", err)
 		}
 		return nil

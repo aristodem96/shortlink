@@ -2,6 +2,24 @@
 MODULE := $(shell go list -m)
 BIN := bin
 
+# Load .env when it exists and put it in the environment of every recipe.
+#
+# Go has no built-in .env support -- the file is a convention of other
+# ecosystems -- and docker compose reads it only for its own substitutions, so
+# without this `make run` would ignore .env entirely and abort on the first
+# required variable.
+#
+# The rewrite of `KEY=value` into `KEY ?= value` is what keeps
+# `HTTP_ADDR=:8090 make run` working. A plain `include` would make .env
+# override anything already exported in the shell, which is the opposite of
+# what anyone expects from a defaults file. Only the first `=` is touched, so
+# values that contain one (a DSN query string, say) survive intact.
+ifneq (,$(wildcard .env))
+$(shell sed -E 's/^([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=/\1 ?= /' .env > .env.mk)
+include .env.mk
+export
+endif
+
 .PHONY: help
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
