@@ -172,7 +172,13 @@ paths:
     get:
       tags: [operations]
       summary: Liveness probe
-      description: Reports only whether the process is running; it does not touch dependencies.
+      description: |
+        Reports only whether the process is running; it does not touch
+        dependencies, so a database outage does not fail this probe.
+
+        Reachable publicly, unlike the other two operational endpoints: an
+        external uptime monitor needs somewhere to knock, and the response
+        carries nothing sensitive.
       operationId: healthz
       security: []
       responses:
@@ -186,7 +192,13 @@ paths:
     get:
       tags: [operations]
       summary: Readiness probe
-      description: Probes Postgres and Redis; returns 503 when either is unavailable.
+      description: |
+        Probes Postgres and Redis; returns 503 when either is unavailable.
+
+        **Not exposed publicly.** The reverse proxy in front of a production
+        deployment answers 404 on this path. It responds normally when the
+        service is reached directly: locally on `localhost:8080`, or from
+        inside the deployment's private network.
       operationId: readyz
       security: []
       responses:
@@ -200,11 +212,28 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Health" }
+        "404":
+          description: |
+            Returned by the reverse proxy in a production deployment, where
+            this path is not exposed publicly.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /metrics:
     get:
       tags: [operations]
       summary: Prometheus metrics
+      description: |
+        Process-wide counters in the Prometheus text format: totals across every
+        tenant, with no per-key breakdown. A caller's own numbers come from
+        `/api/v1/links/{code}/stats`, which is authenticated and scoped to their
+        key.
+
+        **Not exposed publicly.** The reverse proxy in front of a production
+        deployment answers 404 on this path. It responds normally when the
+        service is reached directly: locally on `localhost:8080`, or from
+        inside the deployment's private network.
       operationId: metrics
       security: []
       responses:
@@ -213,6 +242,13 @@ paths:
           content:
             text/plain:
               schema: { type: string }
+        "404":
+          description: |
+            Returned by the reverse proxy in a production deployment, where
+            this path is not exposed publicly.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
 components:
   securitySchemes:

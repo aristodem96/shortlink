@@ -131,6 +131,11 @@ What it changes, and why each one matters on a public IP:
 | logs unbounded | 10 MB × 3 per service | container logs fill the disk given enough time |
 
 Caddy obtains and renews the certificate itself — no certbot step, no cron job.
+It also answers 404 on `/metrics` and `/readyz`: the first is a process-wide
+dump with no per-tenant breakdown, the second reports which dependency is down.
+`/healthz` stays public, because an external uptime monitor needs somewhere to
+knock and the response carries nothing sensitive. A tenant's own numbers come
+from `/api/v1/links/{code}/stats`, which is authenticated and scoped to the key.
 
 **Full instructions, including where the checkout belongs on the server,
 backups and troubleshooting: [DEPLOYMENT.md](DEPLOYMENT.md).**
@@ -349,8 +354,9 @@ that was just cancelled cannot bound the work its own cancellation started.
 | `DELETE` | `/api/v1/links/{code}` | ✔ | Delete a link and its clicks |
 | `GET` | `/api/v1/links/{code}/stats` | ✔ | Clicks, unique visitors, daily histogram, top referrers |
 | `GET` | `/{code}` | — | Redirect, records the click |
-| `GET` | `/healthz`, `/readyz` | — | Liveness and readiness |
-| `GET` | `/metrics` | — | Prometheus metrics |
+| `GET` | `/healthz` | — | Liveness; stays public so an uptime monitor can reach it |
+| `GET` | `/readyz` | — | Readiness; not exposed publicly in production |
+| `GET` | `/metrics` | — | Prometheus metrics; not exposed publicly in production |
 | `GET` | `/docs`, `/openapi.yaml` | — | API documentation |
 
 Authentication is `Authorization: Bearer sl_...`. Every failure uses one

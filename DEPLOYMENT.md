@@ -186,13 +186,19 @@ curl -X POST https://links.example.com/api/v1/links \
 curl -i https://links.example.com/test
 ```
 
-Expect `302` with `Location: https://go.dev`. Confirm the operational endpoints
-are closed to the public:
+Expect `302` with `Location: https://go.dev`. Confirm the proxy exposes what it should and hides what it should not:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' https://links.example.com/metrics
-# 404
+curl -s -o /dev/null -w 'healthz %{http_code}\n' https://links.example.com/healthz   # 200
+curl -s -o /dev/null -w 'metrics %{http_code}\n' https://links.example.com/metrics   # 404
+curl -s -o /dev/null -w 'readyz  %{http_code}\n' https://links.example.com/readyz    # 404
 ```
+
+`/healthz` is public on purpose so an external uptime monitor can reach it; it
+answers `{"status":"ok"}` without touching a dependency. `/metrics` is a
+process-wide dump with no per-tenant breakdown, and `/readyz` names the
+dependency that is down, so both stay behind the proxy — reach them over the
+compose network or an SSH tunnel.
 
 ---
 

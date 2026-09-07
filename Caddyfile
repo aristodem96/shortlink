@@ -3,10 +3,19 @@
 {$SHORTLINK_DOMAIN} {
 	encode zstd gzip
 
-	# The operational endpoints are for the machine, not the public. Blocking
-	# them here keeps /metrics from handing an outsider the service's traffic
-	# profile; reach them over the compose network or an SSH tunnel instead.
-	@internal path /metrics /healthz /readyz
+	# /metrics is a single global dump of every counter in the process: total
+	# links, traffic volume, error rates, Go version, goroutine count. None of
+	# it is per-tenant -- a customer's own numbers come from
+	# /api/v1/links/{code}/stats, which is authenticated and scoped to their
+	# key -- so exposing it publicly leaks operational data and gives nothing
+	# back. /readyz reports which dependency is down, which is useful mainly to
+	# someone timing an attack. Reach both over the compose network or an SSH
+	# tunnel.
+	#
+	# /healthz stays public on purpose: it answers {"status":"ok"} without
+	# touching a dependency, and an external uptime monitor needs somewhere to
+	# knock.
+	@internal path /metrics /readyz
 	respond @internal 404
 
 	reverse_proxy api:8080 {
