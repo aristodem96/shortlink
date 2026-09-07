@@ -1,3 +1,13 @@
+# Pin the project name instead of letting Docker derive it from the directory.
+#
+# By default compose names containers and volumes after the folder it is run
+# from, so a clone into /opt/shortlink and a clone into ~/short_link would each
+# get their own database. Worse, renaming or moving the directory later makes
+# Docker create a fresh empty volume, and the old data looks lost even though
+# it is still on disk under the previous name. Pinning the name makes the
+# location of the checkout irrelevant to the data.
+name: shortlink
+
 services:
   postgres:
     image: postgres:17-alpine

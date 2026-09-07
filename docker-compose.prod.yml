@@ -1,0 +1,113 @@
+# Production overlay. It never replaces docker-compose.yml -- it is layered on
+# top of it, so the local workflow keeps working untouched:
+#
+#   local:      docker compose up -d
+#   production: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# What it changes, and why each change matters on a machine with a public IP:
+#
+#   * Postgres and Redis stop publishing ports. The base file exposes 5432 and
+#     6379 on 0.0.0.0 so `make key` can reach them from the host; on a public
+#     server that is an open invitation, and an unauthenticated Redis is one of
+#     the most reliably exploited services on the internet. The api container
+#     reaches both over the private compose network, which needs no published
+#     port at all.
+#   * The api itself stops publishing too: Caddy is the only way in, and it
+#     terminates TLS with a certificate it obtains and renews on its own.
+#   * Every secret becomes required. `${VAR:?message}` makes compose refuse to
+#     start rather than silently fall back to a development default that is
+#     published in this repository.
+#
+# `!reset` empties a list the base file set instead of appending to it, which is
+# what compose does by default when merging.
+
+services:
+  postgres:
+    ports: !reset []
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-shortlink}
+    restart: unless-stopped
+    # Container logs are unbounded by default and will eventually fill the disk.
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    ports: !reset []
+    # A password on top of network isolation: defence in depth, and it costs
+    # nothing. --save "" keeps Redis in memory only, which is correct for a
+    # cache -- losing it on restart costs one slow request per key, never data.
+    command: ["redis-server", "--save", "", "--appendonly", "no",
+              "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    logging: *logging
+
+  api:
+    ports: !reset []
+    environment:
+      HTTP_ADDR: ":8080"
+      BASE_URL: https://${SHORTLINK_DOMAIN:?set SHORTLINK_DOMAIN in .env}
+      POSTGRES_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-shortlink}?sslmode=disable
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      IP_HASH_SALT: ${IP_HASH_SALT:?set IP_HASH_SALT in .env}
+      # Caddy sits in front and overwrites X-Forwarded-For, so the header can be
+      # trusted here. Without this every click would be attributed to Caddy's
+      # container address: unique visitors would collapse to one, and the
+      # per-IP rate limit would treat the whole internet as a single client.
+      TRUST_PROXY_HEADERS: "true"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: json
+
+      # Operational tuning. Compose passes nothing into a container unless it is
+      # named here, so without these lines setting RATE_LIMIT_RPS in .env on the
+      # server would be silently ignored -- and production is exactly where
+      # these knobs are worth turning. Each falls back to the value the service
+      # uses by default, so an untouched .env changes nothing.
+      RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-20}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-40}
+      CACHE_TTL: ${CACHE_TTL:-1h}
+      CACHE_NEGATIVE_TTL: ${CACHE_NEGATIVE_TTL:-30s}
+      CODE_LENGTH: ${CODE_LENGTH:-7}
+      POSTGRES_MAX_CONNS: ${POSTGRES_MAX_CONNS:-10}
+      CLICKS_BUFFER_SIZE: ${CLICKS_BUFFER_SIZE:-10000}
+      CLICKS_WORKERS: ${CLICKS_WORKERS:-2}
+      CLICKS_BATCH_SIZE: ${CLICKS_BATCH_SIZE:-500}
+      CLICKS_FLUSH_INTERVAL: ${CLICKS_FLUSH_INTERVAL:-2s}
+      HTTP_READ_TIMEOUT: ${HTTP_READ_TIMEOUT:-5s}
+      HTTP_WRITE_TIMEOUT: ${HTTP_WRITE_TIMEOUT:-10s}
+      HTTP_IDLE_TIMEOUT: ${HTTP_IDLE_TIMEOUT:-60s}
+      HTTP_SHUTDOWN_TIMEOUT: ${HTTP_SHUTDOWN_TIMEOUT:-15s}
+    restart: unless-stopped
+    logging: *logging
+
+  caddy:
+    image: caddy:2-alpine
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SHORTLINK_DOMAIN: ${SHORTLINK_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates live here. Losing this volume means re-issuing them, and
+      # Let's Encrypt rate-limits that, so keep it.
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  caddy_data:
+  caddy_config:

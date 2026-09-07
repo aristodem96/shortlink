@@ -1,0 +1,21 @@
+# Caddy obtains and renews a Let's Encrypt certificate for this domain on its
+# own; there is no certbot step and no cron job to forget.
+{$SHORTLINK_DOMAIN} {
+	encode zstd gzip
+
+	# The operational endpoints are for the machine, not the public. Blocking
+	# them here keeps /metrics from handing an outsider the service's traffic
+	# profile; reach them over the compose network or an SSH tunnel instead.
+	@internal path /metrics /healthz /readyz
+	respond @internal 404
+
+	reverse_proxy api:8080 {
+		# Overwrite rather than append. Caddy already replaces a client-supplied
+		# X-Forwarded-For by default, but the service reads the left-most entry
+		# of that header, so if a future version ever appended instead, a client
+		# could put any address first and evade the per-IP rate limit. Setting
+		# both headers explicitly makes the guarantee independent of defaults.
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
+	}
+}
