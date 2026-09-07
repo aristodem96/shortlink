@@ -1,0 +1,383 @@
+openapi: 3.0.3
+
+info:
+  title: shortlink API
+  version: "1.0.0"
+  description: |
+    A URL shortener with click analytics.
+
+    Management endpoints under `/api/v1` require an API key issued by
+    `shortlinkctl issue-key`, sent as `Authorization: Bearer sl_...`.
+    The redirect endpoint is public.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: links
+    description: Create and manage short links
+  - name: redirect
+    description: The public redirect endpoint
+  - name: operations
+    description: Health and metrics
+
+security:
+  - apiKey: []
+
+paths:
+  /api/v1/links:
+    post:
+      tags: [links]
+      summary: Shorten a URL
+      description: |
+        Creates a short link. Without `alias` a random base62 code is
+        generated; codes are random rather than sequential so the corpus of
+        links cannot be enumerated.
+      operationId: createLink
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateLinkRequest"
+            examples:
+              random:
+                summary: Random code
+                value:
+                  target_url: https://go.dev/blog/context
+              alias:
+                summary: Custom alias with an expiry
+                value:
+                  target_url: https://go.dev/blog/context
+                  alias: go-context
+                  expires_at: "2027-01-01T00:00:00Z"
+      responses:
+        "201":
+          description: Created
+          headers:
+            Location:
+              description: The short URL
+              schema: { type: string, format: uri }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Link" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: The alias is already taken
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+    get:
+      tags: [links]
+      summary: List your links
+      operationId: listLinks
+      parameters:
+        - name: limit
+          in: query
+          description: Page size, capped at 100.
+          schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0, minimum: 0 }
+      responses:
+        "200":
+          description: A page of links
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LinkPage" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /api/v1/links/{code}:
+    parameters:
+      - $ref: "#/components/parameters/Code"
+    get:
+      tags: [links]
+      summary: Fetch one of your links
+      operationId: getLink
+      responses:
+        "200":
+          description: The link
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Link" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [links]
+      summary: Delete one of your links
+      description: Deleting a link also removes its recorded clicks.
+      operationId: deleteLink
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/links/{code}/stats:
+    parameters:
+      - $ref: "#/components/parameters/Code"
+      - name: days
+        in: query
+        description: Size of the reporting window, ending now.
+        schema: { type: integer, default: 30, minimum: 1, maximum: 365 }
+    get:
+      tags: [links]
+      summary: Click statistics for a link
+      operationId: getLinkStats
+      responses:
+        "200":
+          description: Aggregated clicks
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LinkStats" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /{code}:
+    parameters:
+      - $ref: "#/components/parameters/Code"
+    get:
+      tags: [redirect]
+      summary: Follow a short link
+      description: |
+        Redirects to the target URL and records the click asynchronously.
+
+        The response is `302 Found` rather than `301`: a permanent redirect
+        would be cached by browsers indefinitely, making the link impossible to
+        retarget and stopping click statistics after the first visit.
+      operationId: redirect
+      security: []
+      responses:
+        "302":
+          description: Redirect to the target URL
+          headers:
+            Location:
+              schema: { type: string, format: uri }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "410":
+          description: The link has expired
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /healthz:
+    get:
+      tags: [operations]
+      summary: Liveness probe
+      description: Reports only whether the process is running; it does not touch dependencies.
+      operationId: healthz
+      security: []
+      responses:
+        "200":
+          description: Alive
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /readyz:
+    get:
+      tags: [operations]
+      summary: Readiness probe
+      description: Probes Postgres and Redis; returns 503 when either is unavailable.
+      operationId: readyz
+      security: []
+      responses:
+        "200":
+          description: Ready to serve traffic
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+        "503":
+          description: A dependency is unavailable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+
+  /metrics:
+    get:
+      tags: [operations]
+      summary: Prometheus metrics
+      operationId: metrics
+      security: []
+      responses:
+        "200":
+          description: Metrics in the Prometheus text exposition format
+          content:
+            text/plain:
+              schema: { type: string }
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: An API key issued by `shortlinkctl issue-key`, e.g. `sl_...`.
+
+  parameters:
+    Code:
+      name: code
+      in: path
+      required: true
+      description: The short code or custom alias.
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{3,32}$"
+      example: go-context
+
+  schemas:
+    CreateLinkRequest:
+      type: object
+      required: [target_url]
+      additionalProperties: false
+      properties:
+        target_url:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: |
+            An http or https URL. Private, loopback and link-local addresses
+            are rejected: an open redirector into a private network is a
+            standard SSRF pivot.
+          example: https://go.dev/blog/context
+        alias:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{3,32}$"
+          description: A custom code. Reserved words such as `api` are refused.
+          example: go-context
+        expires_at:
+          type: string
+          format: date-time
+          description: When set, the link stops redirecting at this instant.
+
+    Link:
+      type: object
+      required: [code, short_url, target_url, created_at]
+      properties:
+        code: { type: string, example: go-context }
+        short_url: { type: string, format: uri, example: "http://localhost:8080/go-context" }
+        target_url: { type: string, format: uri, example: "https://go.dev/blog/context" }
+        expires_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    LinkPage:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Link" }
+        total: { type: integer, format: int64, description: Total links owned by this key. }
+        limit: { type: integer }
+        offset: { type: integer }
+
+    LinkStats:
+      type: object
+      required: [code, total_clicks, unique_visitors, daily, top_referers]
+      properties:
+        code: { type: string }
+        total_clicks: { type: integer, format: int64 }
+        unique_visitors:
+          type: integer
+          format: int64
+          description: Distinct salted IP hashes; raw addresses are never stored.
+        last_click_at: { type: string, format: date-time, nullable: true }
+        daily:
+          type: array
+          items:
+            type: object
+            required: [day, clicks]
+            properties:
+              day: { type: string, example: "2026-09-07", description: "UTC date, YYYY-MM-DD." }
+              clicks: { type: integer, format: int64 }
+        top_referers:
+          type: array
+          items:
+            type: object
+            required: [referer, clicks]
+            properties:
+              referer: { type: string, example: "(direct)" }
+              clicks: { type: integer, format: int64 }
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        version: { type: string }
+        checks:
+          type: object
+          additionalProperties: { type: string, enum: [ok, unavailable] }
+          example: { postgres: ok, redis: ok }
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: A stable machine-readable identifier.
+              enum:
+                - validation_error
+                - not_found
+                - already_exists
+                - expired
+                - unauthorized
+                - forbidden
+                - rate_limited
+                - method_not_allowed
+                - internal_error
+            message: { type: string }
+            field:
+              type: string
+              description: The offending request field, for validation failures.
+
+  responses:
+    ValidationError:
+      description: The request body or query is invalid
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            error:
+              code: validation_error
+              message: must use the http or https scheme
+              field: target_url
+
+    Unauthorized:
+      description: The API key is missing, unknown or revoked
+      headers:
+        WWW-Authenticate:
+          schema: { type: string }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+    NotFound:
+      description: No such link
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+    RateLimited:
+      description: The token bucket for this key or IP is empty
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema: { type: integer }
+        X-RateLimit-Remaining:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }

@@ -1,0 +1,395 @@
+# shortlink
+
+A URL shortener with click analytics, written in Go.
+
+It is a small service on purpose. The interesting part is not the feature list —
+shortening a URL is a `INSERT` and a `SELECT` — but what sits around it: a cache
+that survives a stampede, analytics that never slow the redirect down, a rate
+limiter that stays correct under concurrency, and a shutdown that loses nothing.
+
+```
+POST /api/v1/links  {"target_url": "https://go.dev/blog/context"}
+  -> 201  {"code": "i8zjvlJ", "short_url": "http://localhost:8080/i8zjvlJ"}
+
+GET /i8zjvlJ
+  -> 302  Location: https://go.dev/blog/context
+```
+
+---
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Architecture](#architecture)
+- [Design decisions](#design-decisions)
+- [API](#api)
+- [Configuration](#configuration)
+- [Testing](#testing)
+- [Out of scope](#out-of-scope)
+
+---
+
+## Quick start
+
+Requires Docker. Nothing else — Go, Postgres and Redis all live in containers.
+
+```bash
+make up                  # postgres + redis + api, migrations run on start
+make key NAME=local      # prints an API key once; store it
+```
+
+```bash
+KEY=sl_...               # the key from the previous step
+
+# shorten a URL
+curl -X POST localhost:8080/api/v1/links \
+  -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"target_url":"https://go.dev/blog/context","alias":"go-ctx"}'
+
+# follow it
+curl -i localhost:8080/go-ctx
+
+# see the clicks
+curl localhost:8080/api/v1/links/go-ctx/stats -H "Authorization: Bearer $KEY"
+```
+
+Interactive API docs are at <http://localhost:8080/docs>, metrics at
+`/metrics`, health at `/healthz` and `/readyz`.
+
+`make help` lists every target. If port 8080 is taken, `API_PORT=18080 make up`.
+
+To develop against the containers without rebuilding the image:
+
+```bash
+make deps-up             # just postgres + redis
+cp .env.example .env
+make run
+```
+
+---
+
+## Architecture
+
+Four layers, with dependencies pointing inwards only. `domain` imports nothing
+from the project; `main` is the only place that knows every concrete type.
+
+```
+                       cmd/api (composition root)
+                                 |
+             +-------------------+-------------------+
+             |                                       |
+   transport/httpapi                          storage/postgres
+   routing, middleware,                       storage/rediscache
+   JSON <-> service                           analytics (collector)
+             |                                       |
+             +-------------------+-------------------+
+                                 |
+                            service
+                 use cases, cache-aside, ports
+                                 |
+                             domain
+                 entities, validation, errors
+```
+
+The ports (`LinkRepository`, `LinkCache`, `ClickRecorder`, `CodeGenerator`,
+`APIKeyRepository`) are declared in `internal/service/ports.go` — on the
+consumer side, the idiomatic Go direction. Storage packages never import the
+service; they just happen to satisfy it. The same applies one layer up:
+`httpapi` declares the `LinkService`, `Authenticator` and `RateLimiter`
+interfaces it consumes.
+
+**The redirect path**, which is the only one that has to be fast:
+
+```
+GET /{code}
+  |
+  |-- shaped like a code?          no -> 404, nothing touched
+  |-- Redis GET link:{code}
+  |     hit           -> done
+  |     negative hit  -> 404, database not touched
+  |     miss          -> singleflight -> Postgres -> populate Redis
+  |-- expired?                     yes -> 410
+  |-- enqueue click (non-blocking, dropped if the buffer is full)
+  '-- 302 Location: target
+```
+
+---
+
+## Design decisions
+
+This is the section worth reading. Each of these is a place where the obvious
+implementation is wrong in a way that only shows up under load.
+
+### Short codes are random, not sequential
+
+The textbook shortener encodes an auto-incrementing ID in base62. That makes
+codes enumerable: anyone can count upwards and walk the entire corpus of links
+and their targets. `internal/shortid` draws from `crypto/rand` instead, with
+rejection sampling to remove the modulo bias a naive `b % 62` would introduce
+(the first eight characters of the alphabet would otherwise appear ~1.6x too
+often — there is a test for it).
+
+Random codes can collide, so `Create` retries up to three times on a unique
+violation. With a 7-character code the keyspace is 62⁷ ≈ 3.5 × 10¹², so three
+consecutive collisions means something else is broken. Collisions are counted in
+`shortlink_code_collisions_total`; a rising rate is the signal to raise
+`CODE_LENGTH`.
+
+### Cache misses are cached too
+
+A cache that only stores hits has an open door: request a million random codes
+and every one is a database read. `SetMissing` stores a sentinel for 30 seconds,
+so a scan costs one query instead of a million. `Create` invalidates that entry,
+otherwise a code someone probed before it existed would 404 until the negative
+entry expired.
+
+### Concurrent misses collapse into one query
+
+When a popular link falls out of cache, every in-flight request for it misses at
+once and they all hit Postgres — a cache stampede. `golang.org/x/sync/singleflight`
+collapses them into a single read.
+
+The subtlety is the context. The shared fetch must **not** inherit the context of
+whichever caller happened to win the race, because if that client disconnects,
+its cancellation propagates to everyone waiting behind it. The fetch runs on
+`context.WithoutCancel(ctx)` with its own timeout. Both behaviours are tested
+(`TestResolve_CoalescesConcurrentMisses`, `TestResolve_SurvivesCallerCancellation`).
+
+### A cache outage degrades latency, not availability
+
+Every cache error is logged and falls through to Postgres. The rate limiter
+fails **open** for the same reason: it is a protection mechanism, not a
+correctness one, and failing closed would turn a Redis blip into a total outage.
+
+### Clicks are written asynchronously, in batches, and are droppable
+
+Writing a row per redirect puts a database write on the hot path. Instead
+`internal/analytics` buffers clicks in a channel drained by a worker pool that
+flushes on batch size or on a ticker.
+
+`Record` is non-blocking: if the buffer is full the event is dropped and counted
+in `shortlink_clicks_dropped_total`. Analytics is sacrificed so redirects stay
+fast — that is a deliberate trade, and the metric makes it visible.
+
+The queue channel is deliberately **never closed**. A redirect can be in flight
+while shutdown starts, and a send on a closed channel panics. Shutdown closes a
+separate `done` channel; workers then drain whatever is buffered and flush it,
+so nothing already accepted is lost. `Close` respects a context, so a wedged
+database surfaces as a shutdown error rather than a hang.
+
+### Clicks are inserted with `unnest`, not `CopyFrom`
+
+`CopyFrom` is the fast path for bulk inserts in pgx, and it is the wrong tool
+here. Clicks are buffered for seconds, so a link can be deleted between the
+redirect and the flush; the resulting foreign key violation would fail the
+entire batch. The insert passes parallel arrays through `unnest` with an
+`EXISTS` filter, which drops exactly the orphan rows and commits the rest.
+There is an integration test that deletes a link out from under a batch.
+
+### The rate limiter is a Lua token bucket
+
+A read-modify-write from Go would need a `WATCH`/`MULTI` retry loop or a lock;
+under contention both cost more than the limiter saves. The bucket is a Lua
+script, so it is one round trip and cannot interleave — 200 concurrent callers
+are granted exactly the burst size, never more (`TestLimiter_IsAtomicUnderConcurrency`).
+
+A token bucket rather than a fixed window because a fixed window lets a client
+spend its whole quota in the last millisecond of one window and again in the
+first of the next: double the intended rate at the boundary.
+
+Buckets are keyed by API key when the caller is authenticated and by IP
+otherwise, so one noisy tenant cannot spend the quota of everyone behind the
+same NAT.
+
+### `X-Forwarded-For` is ignored by default
+
+The header is client-controlled. Trusting it unconditionally lets anyone forge
+an address and walk around the per-IP limit by rotating a value. It is honoured
+only when `TrustProxyHeaders` is set, which is a deployment fact, not a default.
+
+### Redirect targets cannot point at private networks
+
+An open redirector into a VPC is a standard SSRF pivot, and a shortener is
+exactly the service that gets abused for it. `domain.NormalizeTargetURL` rejects
+non-`http(s)` schemes, loopback, private, link-local (including
+`169.254.169.254`, the cloud metadata endpoint), carrier-grade NAT and
+`.local` hostnames.
+
+### Aliases cannot shadow the router
+
+The redirect route is mounted at the root, so an alias of `api` or `metrics`
+would shadow real endpoints. `domain.ValidateAlias` keeps a reserved list.
+
+### 302, not 301
+
+A permanent redirect is cached by browsers indefinitely: the link could never be
+retargeted or deleted, and click statistics would stop after the first visit.
+The response also carries `Cache-Control: no-store` and
+`Referrer-Policy: no-referrer`, so the short code does not leak to the
+destination.
+
+### Someone else's link is 404, not 403
+
+A 403 confirms that a code exists. Ownership failures are reported as not found.
+
+### API keys are stored hashed, and verification is cached
+
+Only the SHA-256 of a key is persisted, so a database dump yields nothing
+usable. Verification is cached in memory for 30 seconds — including **failures**,
+because without a negative cache an attacker spraying random keys gets one free
+database lookup per guess. The cache is bounded, so spraying cannot grow it
+without limit. The trade is explicit: a revoked key keeps working for up to 30
+seconds.
+
+### Visitor IPs are pseudonymised
+
+Storing raw addresses would make the clicks table personal data under GDPR for
+no analytical gain: counting unique visitors only needs a stable identifier.
+Addresses are stored as a salted SHA-256 — salted because an unsalted digest of
+an IPv4 address is inverted by hashing all four billion of them. The service
+refuses to start without `IP_HASH_SALT`.
+
+### Metrics are labelled by route template, not path
+
+Labelling by path would mint one Prometheus time series per short code and take
+the metrics backend down. `chi`'s `RoutePattern()` gives `/{code}`.
+
+### Liveness does not probe dependencies
+
+`/healthz` reports only whether the process is alive. If it probed Postgres, a
+database blip would fail every replica's liveness check at once and the
+orchestrator would restart the whole fleet — turning a recoverable outage into
+a cold start. `/readyz` does the probing, concurrently, and answers 503.
+
+### Shutdown is ordered
+
+`SIGTERM` cancels the root context. The HTTP server drains first, so no new
+clicks are produced, and only then does the collector flush what is buffered.
+The shutdown context is built with `context.WithoutCancel`, because the context
+that was just cancelled cannot bound the work its own cancellation started.
+
+---
+
+## API
+
+| Method | Path | Auth | Description |
+|---|---|:--:|---|
+| `POST` | `/api/v1/links` | ✔ | Shorten a URL, optionally with an alias and expiry |
+| `GET` | `/api/v1/links` | ✔ | List your links, newest first, paginated |
+| `GET` | `/api/v1/links/{code}` | ✔ | Fetch one of your links |
+| `DELETE` | `/api/v1/links/{code}` | ✔ | Delete a link and its clicks |
+| `GET` | `/api/v1/links/{code}/stats` | ✔ | Clicks, unique visitors, daily histogram, top referrers |
+| `GET` | `/{code}` | — | Redirect, records the click |
+| `GET` | `/healthz`, `/readyz` | — | Liveness and readiness |
+| `GET` | `/metrics` | — | Prometheus metrics |
+| `GET` | `/docs`, `/openapi.yaml` | — | API documentation |
+
+Authentication is `Authorization: Bearer sl_...`. Every failure uses one
+envelope, so clients parse errors without branching per endpoint:
+
+```json
+{ "error": { "code": "validation_error",
+             "message": "must use the http or https scheme",
+             "field": "target_url" } }
+```
+
+The full contract is in [`api/openapi.yaml`](api/openapi.yaml), embedded into
+the binary so the published spec cannot drift from the build that serves it.
+
+---
+
+## Configuration
+
+Everything comes from the environment; see [`.env.example`](.env.example) for
+the full list with defaults. Configuration is validated at startup and **all**
+problems are reported at once, so a misconfigured deployment does not fail one
+variable per restart.
+
+The only variable without a default is `IP_HASH_SALT`.
+
+---
+
+## Testing
+
+```bash
+make test              # unit tests only, no Docker needed
+make test-integration  # adds testcontainers-backed integration tests
+make cover             # HTML coverage report
+```
+
+77.9% of statements overall; 87–100% in the packages that carry logic.
+
+**Unit tests** use hand-written fakes rather than generated mocks. The ports are
+small and the tests need behaviour — a repository that really stores links, a
+cache that can be told to fail — which generated mocks express as a pile of
+expectation setup while adding a code-generation step to the build.
+
+**Integration tests** run against real PostgreSQL 17 and Redis 7 in Docker via
+testcontainers, because what they verify cannot fail in a fake: the `ON CONFLICT`
+insert, the window-function pagination, the batched stats query, the `unnest`
+write surviving a deleted link, and the Lua limiter's atomicity under 200
+concurrent callers. The migrations themselves run as part of the setup. They are
+skipped by `-short`, so the unit suite stays runnable without Docker.
+
+The concurrency tests are the ones worth reading:
+`TestResolve_CoalescesConcurrentMisses`, `TestResolve_SurvivesCallerCancellation`,
+`TestCollector_CloseDrainsEverythingQueued`,
+`TestCollector_RecordDuringShutdownDoesNotPanic`,
+`TestLimiter_IsAtomicUnderConcurrency`. The whole suite runs under `-race` in CI.
+
+CI (GitHub Actions) runs `gofmt`, `go vet`, `golangci-lint`, a tidiness check on
+`go.mod`, the full race-enabled suite including integration tests, and a
+container image build.
+
+---
+
+## Out of scope
+
+Deliberate omissions, so their absence reads as a decision rather than an
+oversight:
+
+- **No user accounts or JWT.** API keys carry the same security lessons —
+  hashing, revocation, bounded caching — without a login flow that adds
+  nothing to the interesting parts.
+- **No Kafka, no service mesh, no gRPC.** A single service with one database and
+  one cache is the honest shape of this problem. Adding a broker to publish
+  click events would be architecture as decoration.
+- **No custom domains, QR codes, link editing, or a web UI.** More endpoints
+  in the same shape, no new engineering.
+- **No Grafana dashboards.** Metrics are exposed; wiring a dashboard is
+  configuration, not code.
+
+Real next steps, if this were a product: partition or roll up the `clicks` table
+(the daily histogram scans raw rows and will not stay fast), move the redirect
+behind a CDN, and add a background sweep for expired links.
+
+---
+
+## Layout
+
+```
+cmd/api               composition root: wiring, signals, graceful shutdown
+cmd/shortlinkctl      operator CLI, shares the service packages
+internal/domain       entities, validation, sentinel errors — imports nothing local
+internal/service      use cases, ports, cache-aside, singleflight
+internal/analytics    click collector (worker pool) and IP pseudonymisation
+internal/storage/     postgres (pgx) and rediscache (cache + Lua limiter)
+internal/transport/   HTTP routing, middleware, JSON mapping
+internal/shortid      random base62 code generation
+internal/observability  slog setup and Prometheus metrics
+migrations            embedded SQL, applied on start
+api                   embedded OpenAPI spec
+```
+
+---
+
+## Using this as a starting point
+
+```bash
+make rename MODULE_NEW=github.com/you/shortlink
+```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
