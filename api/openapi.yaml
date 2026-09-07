@@ -14,8 +14,13 @@ info:
     url: https://opensource.org/licenses/MIT
 
 servers:
-  - url: http://localhost:8080
-    description: Local development
+  # A relative URL, resolved against wherever this document is being served
+  # from. That makes "Try it out" target localhost:8080 during development and
+  # the real domain in production, without this file differing between the two
+  # -- and the spec is embedded in the binary, so there is no build step that
+  # could substitute a value here anyway.
+  - url: /
+    description: This deployment
 
 tags:
   - name: links
@@ -298,7 +303,14 @@ components:
       required: [code, short_url, target_url, created_at]
       properties:
         code: { type: string, example: go-context }
-        short_url: { type: string, format: uri, example: "http://localhost:8080/go-context" }
+        short_url:
+          type: string
+          format: uri
+          description: |
+            The full short link. Its origin is the service's configured
+            BASE_URL, so it is `http://localhost:8080/...` in a default local
+            setup and `https://your.domain/...` once deployed.
+          example: "https://sho.rt/go-context"
         target_url: { type: string, format: uri, example: "https://go.dev/blog/context" }
         expires_at: { type: string, format: date-time, nullable: true }
         created_at: { type: string, format: date-time }
