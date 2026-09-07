@@ -20,6 +20,7 @@ GET /i8zjvlJ
 ## Contents
 
 - [Quick start](#quick-start)
+- [Deploying to a server](#deploying-to-a-server)
 - [Architecture](#architecture)
 - [Design decisions](#design-decisions)
 - [API](#api)
@@ -107,6 +108,32 @@ fatal: http server: listen on :8080: bind: address already in use
 
 Configuration is validated at startup and reports **every** problem at once, so
 a misconfigured deployment does not fail one variable per restart.
+
+### Deploying to a server
+
+`docker-compose.prod.yml` is an overlay, not a replacement: it layers on top of
+the base file, so the local workflow above keeps working untouched.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+What it changes, and why each one matters on a public IP:
+
+| Base file (local) | Overlay (server) | Reason |
+|---|---|---|
+| Postgres on `0.0.0.0:5432` | not published | the port is scanned continuously; the api reaches it over the private compose network |
+| Redis on `0.0.0.0:6379`, no password | not published, password required | an unauthenticated Redis is among the most reliably exploited services on the internet |
+| api on `0.0.0.0:8080` | not published | Caddy is the only way in, and it terminates TLS |
+| passwords `shortlink:shortlink` | `${VAR:?}`, refuses to start unset | the defaults are published in this repository |
+| `IP_HASH_SALT` defaults | required | a known salt makes the visitor hashes reversible |
+| direct connections | `TRUST_PROXY_HEADERS=true` | behind a proxy every click would otherwise be attributed to Caddy's own address |
+| logs unbounded | 10 MB × 3 per service | container logs fill the disk given enough time |
+
+Caddy obtains and renews the certificate itself — no certbot step, no cron job.
+
+**Full instructions, including where the checkout belongs on the server,
+backups and troubleshooting: [DEPLOYMENT.md](DEPLOYMENT.md).**
 
 ---
 
