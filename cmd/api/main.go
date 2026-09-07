@@ -127,9 +127,10 @@ func run() error {
 			{Name: "postgres", Probe: pool.Ping},
 			{Name: "redis", Probe: func(ctx context.Context) error { return rdb.Ping(ctx).Err() }},
 		},
-		Logger:  log,
-		BaseURL: cfg.BaseURL,
-		Version: version,
+		Logger:            log,
+		BaseURL:           cfg.BaseURL,
+		Version:           version,
+		TrustProxyHeaders: cfg.TrustProxyHeaders,
 	})
 
 	server := &http.Server{
@@ -154,9 +155,10 @@ func run() error {
 		// way round: the log would claim the server is listening a moment
 		// before the bind fails, which reads as a contradiction in the logs of
 		// the one situation where they matter most.
-		// ListenConfig rather than net.Listen so that a shutdown signal during
-		// a slow DNS or bind aborts startup instead of being noticed only
-		// afterwards.
+		//
+		// ListenConfig rather than net.Listen so the bind honours ctx: a
+		// shutdown signal during startup aborts it instead of being noticed
+		// only once the server is already up.
 		var lc net.ListenConfig
 		listener, err := lc.Listen(ctx, "tcp", server.Addr)
 		if err != nil {

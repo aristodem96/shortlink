@@ -33,6 +33,12 @@ type Config struct {
 	// IPHashSalt is mixed into visitor IP hashes so that the stored digests
 	// cannot be reversed with a rainbow table of the IPv4 space.
 	IPHashSalt string
+	// TrustProxyHeaders makes the service read the client address from
+	// X-Forwarded-For instead of the socket. Enable it only when a proxy that
+	// overwrites the header really does sit in front: the header is
+	// client-controlled, so trusting it on a directly exposed service lets
+	// anyone forge an address and walk around the per-IP rate limit.
+	TrustProxyHeaders bool
 }
 
 // HTTP configures the public HTTP server.
@@ -130,9 +136,10 @@ func Load() (*Config, error) {
 			Level:  strings.ToLower(envString("LOG_LEVEL", "info")),
 			Format: strings.ToLower(envString("LOG_FORMAT", "json")),
 		},
-		BaseURL:    strings.TrimRight(envString("BASE_URL", "http://localhost:8080"), "/"),
-		CodeLength: envInt("CODE_LENGTH", 7, collect),
-		IPHashSalt: envString("IP_HASH_SALT", ""),
+		BaseURL:           strings.TrimRight(envString("BASE_URL", "http://localhost:8080"), "/"),
+		CodeLength:        envInt("CODE_LENGTH", 7, collect),
+		IPHashSalt:        envString("IP_HASH_SALT", ""),
+		TrustProxyHeaders: envBool("TRUST_PROXY_HEADERS", false, collect),
 	}
 
 	if err := errors.Join(errs...); err != nil {
@@ -247,6 +254,19 @@ func envInt32(key string, def int32, collect func(error)) int32 {
 		return def
 	}
 	return int32(n)
+}
+
+func envBool(key string, def bool, collect func(error)) bool {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		collect(fmt.Errorf("%s: %q is not a boolean (try true or false)", key, v))
+		return def
+	}
+	return b
 }
 
 func envFloat(key string, def float64, collect func(error)) float64 {

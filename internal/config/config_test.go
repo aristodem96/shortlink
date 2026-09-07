@@ -15,7 +15,7 @@ var configKeys = []string{
 	"REDIS_PASSWORD", "REDIS_DB", "CACHE_TTL", "CACHE_NEGATIVE_TTL",
 	"RATE_LIMIT_RPS", "RATE_LIMIT_BURST", "CLICKS_BUFFER_SIZE", "CLICKS_WORKERS",
 	"CLICKS_BATCH_SIZE", "CLICKS_FLUSH_INTERVAL", "LOG_LEVEL", "LOG_FORMAT",
-	"BASE_URL", "CODE_LENGTH", "IP_HASH_SALT",
+	"BASE_URL", "CODE_LENGTH", "IP_HASH_SALT", "TRUST_PROXY_HEADERS",
 }
 
 // isolateEnv blanks every configuration variable for the duration of one test.
