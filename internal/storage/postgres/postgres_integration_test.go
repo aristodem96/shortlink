@@ -367,14 +367,14 @@ func TestAPIKeyRepository(t *testing.T) {
 	t.Run("round-trips revocation", func(t *testing.T) {
 		key, err := keys.Create(ctx, "revocable", []byte("revocable-hash"))
 		require.NoError(t, err)
-		assert.True(t, key.IsActive())
+		assert.True(t, key.IsActive(time.Now()))
 
 		_, err = testPool.Exec(ctx, `UPDATE api_keys SET revoked_at = now() WHERE id = $1`, key.ID)
 		require.NoError(t, err)
 
 		got, err := keys.GetByHash(ctx, []byte("revocable-hash"))
 		require.NoError(t, err)
-		assert.False(t, got.IsActive())
+		assert.False(t, got.IsActive(time.Now()))
 	})
 }
 

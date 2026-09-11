@@ -182,6 +182,125 @@ func LoadDatabase() (*Postgres, error) {
 	return cfg, nil
 }
 
+// Bot is the configuration of the Telegram bot process.
+type Bot struct {
+	Postgres Postgres
+	Log      Log
+
+	TelegramToken  string
+	CryptoPayToken string
+	// CryptoPayURL is the provider base URL, derived from CRYPTOPAY_NETWORK.
+	CryptoPayURL string
+	Network      string
+
+	PriceUSD       string
+	AccessDays     int
+	MaxKeys        int
+	AcceptedAssets []string
+	InvoiceTTL     time.Duration
+
+	// ReconcileInterval is how often pending invoices are checked with the
+	// provider, which covers lost webhooks and local development alike.
+	ReconcileInterval time.Duration
+	// HTTPAddr serves the payment webhook.
+	HTTPAddr string
+	// APIBaseURL is shown to buyers as the address of the API.
+	APIBaseURL string
+	// Timezone is the zone dates are shown to buyers in.
+	Timezone string
+}
+
+// LoadBot reads the bot configuration from the environment.
+func LoadBot() (*Bot, error) {
+	var errs []error
+	collect := func(err error) {
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	cfg := &Bot{
+		Postgres: Postgres{
+			DSN:      envString("POSTGRES_DSN", "postgres://shortlink:shortlink@localhost:5432/shortlink?sslmode=disable"),
+			MaxConns: envInt32("POSTGRES_MAX_CONNS", 5, collect),
+		},
+		Log: Log{
+			Level:  strings.ToLower(envString("LOG_LEVEL", "info")),
+			Format: strings.ToLower(envString("LOG_FORMAT", "json")),
+		},
+		TelegramToken:  envString("TELEGRAM_BOT_TOKEN", ""),
+		CryptoPayToken: envString("CRYPTOPAY_TOKEN", ""),
+		// Testnet by default: a bot started without thinking about it must not
+		// be able to take real money. Mainnet is always a deliberate choice.
+		Network:           strings.ToLower(envString("CRYPTOPAY_NETWORK", "testnet")),
+		PriceUSD:          envString("PRICE_USD", "10"),
+		AccessDays:        envInt("ACCESS_DAYS", 5, collect),
+		MaxKeys:           envInt("MAX_KEYS_PER_USER", 5, collect),
+		AcceptedAssets:    splitList(envString("CRYPTOPAY_ASSETS", "USDT,TON")),
+		InvoiceTTL:        envDuration("INVOICE_TTL", time.Hour, collect),
+		ReconcileInterval: envDuration("RECONCILE_INTERVAL", 20*time.Second, collect),
+		HTTPAddr:          envString("BOT_HTTP_ADDR", ":8090"),
+		APIBaseURL:        strings.TrimRight(envString("BASE_URL", "http://localhost:8080"), "/"),
+		Timezone:          envString("BOT_TIMEZONE", "Europe/Kyiv"),
+	}
+
+	switch cfg.Network {
+	case "testnet":
+		cfg.CryptoPayURL = "https://testnet-pay.crypt.bot"
+	case "mainnet":
+		cfg.CryptoPayURL = "https://pay.crypt.bot"
+	default:
+		errs = append(errs, fmt.Errorf("CRYPTOPAY_NETWORK must be testnet or mainnet, got %q", cfg.Network))
+	}
+
+	require := func(ok bool, problem string) {
+		if !ok {
+			errs = append(errs, errors.New(problem))
+		}
+	}
+	require(cfg.TelegramToken != "", "TELEGRAM_BOT_TOKEN must be set")
+	require(cfg.CryptoPayToken != "", "CRYPTOPAY_TOKEN must be set")
+	require(cfg.Postgres.DSN != "", "POSTGRES_DSN must be set")
+	require(isPositiveAmount(cfg.PriceUSD), "PRICE_USD must be a positive amount such as 10 or 9.99")
+	require(cfg.AccessDays > 0, "ACCESS_DAYS must be positive")
+	require(cfg.MaxKeys > 0, "MAX_KEYS_PER_USER must be positive")
+	require(len(cfg.AcceptedAssets) > 0, "CRYPTOPAY_ASSETS must list at least one asset")
+	require(cfg.InvoiceTTL >= time.Minute, "INVOICE_TTL must be at least 1m")
+	require(cfg.ReconcileInterval >= time.Second, "RECONCILE_INTERVAL must be at least 1s")
+
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func splitList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if part = strings.ToUpper(strings.TrimSpace(part)); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// isPositiveAmount accepts a plain decimal with at most two fractional digits.
+// The price is sent to the provider verbatim, so it is checked here rather
+// than discovered as a rejected invoice at the first sale.
+func isPositiveAmount(s string) bool {
+	whole, frac, hasFrac := strings.Cut(s, ".")
+	if whole == "" || (hasFrac && (frac == "" || len(frac) > 2)) {
+		return false
+	}
+	for _, r := range whole + frac {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	return err == nil && v > 0
+}
+
 func (c *Config) validate() error {
 	var errs []error
 	require := func(ok bool, problem string) {

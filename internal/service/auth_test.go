@@ -54,6 +54,15 @@ func (r *fakeKeyRepo) Create(_ context.Context, name string, hash []byte) (*doma
 	return &copied, nil
 }
 
+func (r *fakeKeyRepo) setExpiry(secret string, at time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if key, ok := r.byHash[string(HashKey(secret))]; ok {
+		key.ExpiresAt = &at
+	}
+}
+
 func (r *fakeKeyRepo) revoke(secret string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -261,4 +270,136 @@ func TestTTLCache_TreatsExpiredEntriesAsAbsent(t *testing.T) {
 
 	_, ok = cache.get("k", now.Add(2*time.Second))
 	assert.False(t, ok)
+}
+
+func TestAuthenticate_RejectsAnExpiredKey(t *testing.T) {
+	t.Parallel()
+
+	repo := newFakeKeyRepo()
+	auth := NewAuthenticator(repo)
+	ctx := context.Background()
+
+	secret, _, err := auth.Issue(ctx, "bought")
+	require.NoError(t, err)
+	repo.setExpiry(secret, time.Now().Add(-time.Minute))
+
+	_, err = auth.Authenticate(ctx, secret)
+	assert.ErrorIs(t, err, domain.ErrUnauthorized)
+}
+
+// TestAuthenticate_ExpiryIsExactDespiteTheCache checks that a cached key stops
+// working at its expiry, not up to one cache TTL later.
+func TestAuthenticate_ExpiryIsExactDespiteTheCache(t *testing.T) {
+	t.Parallel()
+
+	repo := newFakeKeyRepo()
+	auth := NewAuthenticator(repo)
+	ctx := context.Background()
+
+	secret, _, err := auth.Issue(ctx, "bought")
+	require.NoError(t, err)
+
+	now := time.Now()
+	repo.setExpiry(secret, now.Add(10*time.Second))
+
+	_, err = auth.Authenticate(ctx, secret)
+	require.NoError(t, err, "valid now, and now cached")
+
+	// Well inside the cache TTL, but past the key's expiry.
+	auth.now = func() time.Time { return now.Add(11 * time.Second) }
+
+	_, err = auth.Authenticate(ctx, secret)
+	assert.ErrorIs(t, err, domain.ErrUnauthorized)
+}
+
+// TestAuthenticate_RenewalTakesEffectImmediately covers the other direction.
+// A cached copy that looks expired is re-read rather than refused: the owner
+// may have paid again, which moves expires_at in the database but not in the
+// cached copy.
+func TestAuthenticate_RenewalTakesEffectImmediately(t *testing.T) {
+	t.Parallel()
+
+	repo := newFakeKeyRepo()
+	auth := NewAuthenticator(repo)
+	ctx := context.Background()
+
+	secret, _, err := auth.Issue(ctx, "bought")
+	require.NoError(t, err)
+
+	now := time.Now()
+	repo.setExpiry(secret, now.Add(10*time.Second))
+	_, err = auth.Authenticate(ctx, secret)
+	require.NoError(t, err)
+
+	auth.now = func() time.Time { return now.Add(11 * time.Second) }
+	repo.setExpiry(secret, now.Add(5*24*time.Hour)) // the user renewed
+
+	_, err = auth.Authenticate(ctx, secret)
+	assert.NoError(t, err, "a renewed key must work at once, not after the cache TTL")
+}
+
+func TestAuthenticate_OperatorKeysNeverExpire(t *testing.T) {
+	t.Parallel()
+
+	repo := newFakeKeyRepo()
+	auth := NewAuthenticator(repo)
+
+	secret, key, err := auth.Issue(context.Background(), "operator")
+	require.NoError(t, err)
+	assert.Nil(t, key.ExpiresAt, "keys from shortlinkctl carry no expiry")
+
+	auth.now = func() time.Time { return time.Now().Add(10 * 365 * 24 * time.Hour) }
+	_, err = auth.Authenticate(context.Background(), secret)
+	assert.NoError(t, err)
+}
+
+// TestAuthenticate_RenewalAfterARefusalIsNotBlockedForLong covers the moment
+// right after paying. The user tried their lapsed key (refused, and the
+// refusal cached), then paid, then tried again. A 30-second negative cache
+// would greet a customer who has just been told "payment received" with 401.
+func TestAuthenticate_RenewalAfterARefusalIsNotBlockedForLong(t *testing.T) {
+	t.Parallel()
+
+	repo := newFakeKeyRepo()
+	auth := NewAuthenticator(repo)
+	ctx := context.Background()
+
+	secret, _, err := auth.Issue(ctx, "bought")
+	require.NoError(t, err)
+
+	now := time.Now()
+	repo.setExpiry(secret, now.Add(-time.Minute)) // lapsed
+
+	_, err = auth.Authenticate(ctx, secret)
+	require.ErrorIs(t, err, domain.ErrUnauthorized, "refused, and the refusal is now cached")
+
+	repo.setExpiry(secret, now.Add(5*24*time.Hour)) // the user paid
+
+	auth.now = func() time.Time { return now.Add(expiredRecheckTTL + time.Second) }
+	_, err = auth.Authenticate(ctx, secret)
+	assert.NoError(t, err, "within seconds of renewing, not after the full cache TTL")
+}
+
+// TestAuthenticate_RevokedKeysStayRefusedForTheFullTTL: the short recheck is
+// only for keys that can come back. A revoked key cannot, so there is no
+// reason to let it hit the database every few seconds.
+func TestAuthenticate_RevokedKeysStayRefusedForTheFullTTL(t *testing.T) {
+	t.Parallel()
+
+	repo := newFakeKeyRepo()
+	auth := NewAuthenticator(repo)
+	ctx := context.Background()
+
+	secret, _, err := auth.Issue(ctx, "gone")
+	require.NoError(t, err)
+	repo.revoke(secret)
+
+	_, err = auth.Authenticate(ctx, secret)
+	require.ErrorIs(t, err, domain.ErrUnauthorized)
+	lookups := repo.lookups.Load()
+
+	auth.now = func() time.Time { return time.Now().Add(expiredRecheckTTL + time.Second) }
+	_, err = auth.Authenticate(ctx, secret)
+	require.ErrorIs(t, err, domain.ErrUnauthorized)
+	assert.Equal(t, lookups, repo.lookups.Load(), "a revoked key is served from the negative cache, not re-read")
 }

@@ -29,6 +29,17 @@ const (
 	// trade, and the window is short enough to be operationally honest.
 	authCacheTTL = 30 * time.Second
 
+	// expiredRecheckTTL is how long the refusal of an *expired* key is cached.
+	//
+	// It is much shorter than authCacheTTL on purpose. An unknown or revoked
+	// key never comes back, so its refusal can be cached for the full TTL. An
+	// expired key comes back the moment its owner pays -- and the moment right
+	// after paying, having just been told "payment received", is exactly when
+	// they will try it. Caching that refusal for 30 seconds would answer a
+	// brand-new customer with 401. Five seconds still bounds the database load
+	// an expired key can cause to one lookup per interval.
+	expiredRecheckTTL = 5 * time.Second
+
 	// authCacheMaxEntries caps memory. The cache is a plain map, so an
 	// attacker spraying random keys must not be able to grow it without bound.
 	authCacheMaxEntries = 4096
@@ -70,28 +81,51 @@ func (a *Authenticator) Authenticate(ctx context.Context, secret string) (*domai
 	hash := HashKey(secret)
 	cacheKey := string(hash)
 
-	if entry, ok := a.cache.get(cacheKey, a.now()); ok {
+	now := a.now()
+	if entry, ok := a.cache.get(cacheKey, now); ok {
 		if entry == nil {
 			return nil, domain.ErrUnauthorized
 		}
-		return entry, nil
+		if entry.IsActive(now) {
+			return entry, nil
+		}
+		// The cached copy has expired. That is not a reason to refuse: the
+		// owner may have renewed since it was cached, which moves expires_at
+		// in the database but not in this copy. Fall through and re-read it,
+		// so a renewal takes effect immediately instead of after the TTL.
 	}
 
 	key, err := a.repo.GetByHash(ctx, hash)
 	if errors.Is(err, domain.ErrNotFound) {
-		a.cache.set(cacheKey, nil, a.now().Add(authCacheTTL))
+		a.cache.set(cacheKey, nil, now.Add(authCacheTTL))
 		return nil, domain.ErrUnauthorized
 	}
 	if err != nil {
 		return nil, fmt.Errorf("look up api key: %w", err)
 	}
-	if !key.IsActive() {
-		a.cache.set(cacheKey, nil, a.now().Add(authCacheTTL))
+	if key.RevokedAt != nil {
+		a.cache.set(cacheKey, nil, now.Add(authCacheTTL))
+		return nil, domain.ErrUnauthorized
+	}
+	if !key.IsActive(now) {
+		// Expired rather than revoked: its owner can renew it, so recheck soon.
+		a.cache.set(cacheKey, nil, now.Add(expiredRecheckTTL))
 		return nil, domain.ErrUnauthorized
 	}
 
-	a.cache.set(cacheKey, key, a.now().Add(authCacheTTL))
+	a.cache.set(cacheKey, key, now.Add(authCacheTTL))
 	return key, nil
+}
+
+// NewSecret generates a fresh API key secret. It is exported so every place
+// that mints keys -- the operator CLI and the Telegram bot -- produces them the
+// same way, with the same prefix and the same entropy.
+func NewSecret() (string, error) {
+	buf := make([]byte, keySecretBytes)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generate api key: %w", err)
+	}
+	return KeyPrefix + base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 // Issue creates a new API key and returns the secret. The secret is returned
@@ -102,11 +136,10 @@ func (a *Authenticator) Issue(ctx context.Context, name string) (string, *domain
 		return "", nil, &domain.ValidationError{Field: "name", Reason: "must not be empty"}
 	}
 
-	buf := make([]byte, keySecretBytes)
-	if _, err := rand.Read(buf); err != nil {
-		return "", nil, fmt.Errorf("generate api key: %w", err)
+	secret, err := NewSecret()
+	if err != nil {
+		return "", nil, err
 	}
-	secret := KeyPrefix + base64.RawURLEncoding.EncodeToString(buf)
 
 	key, err := a.repo.Create(ctx, name, HashKey(secret))
 	if err != nil {

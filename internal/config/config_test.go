@@ -16,6 +16,9 @@ var configKeys = []string{
 	"RATE_LIMIT_RPS", "RATE_LIMIT_BURST", "CLICKS_BUFFER_SIZE", "CLICKS_WORKERS",
 	"CLICKS_BATCH_SIZE", "CLICKS_FLUSH_INTERVAL", "LOG_LEVEL", "LOG_FORMAT",
 	"BASE_URL", "CODE_LENGTH", "IP_HASH_SALT", "TRUST_PROXY_HEADERS",
+	"TELEGRAM_BOT_TOKEN", "CRYPTOPAY_TOKEN", "CRYPTOPAY_NETWORK", "PRICE_USD",
+	"ACCESS_DAYS", "MAX_KEYS_PER_USER", "CRYPTOPAY_ASSETS", "INVOICE_TTL",
+	"RECONCILE_INTERVAL", "BOT_HTTP_ADDR", "BOT_TIMEZONE",
 }
 
 // isolateEnv blanks every configuration variable for the duration of one test.
@@ -121,4 +124,79 @@ func TestLoad_RejectsMalformedValues(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "CACHE_TTL")
 	assert.Contains(t, err.Error(), "POSTGRES_MAX_CONNS")
+}
+
+func setBotEnv(t *testing.T) {
+	t.Helper()
+	isolateEnv(t)
+	t.Setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+	t.Setenv("CRYPTOPAY_TOKEN", "456:def")
+}
+
+// TestLoadBot_DefaultsToTestnet: a bot started without thinking about the
+// network must not be able to take real money.
+func TestLoadBot_DefaultsToTestnet(t *testing.T) {
+	setBotEnv(t)
+
+	cfg, err := LoadBot()
+	require.NoError(t, err)
+	assert.Equal(t, "testnet", cfg.Network)
+	assert.Equal(t, "https://testnet-pay.crypt.bot", cfg.CryptoPayURL)
+	assert.Equal(t, "10", cfg.PriceUSD)
+	assert.Equal(t, 5, cfg.AccessDays)
+	assert.Equal(t, []string{"USDT", "TON"}, cfg.AcceptedAssets)
+}
+
+func TestLoadBot_MainnetIsExplicit(t *testing.T) {
+	setBotEnv(t)
+	t.Setenv("CRYPTOPAY_NETWORK", "mainnet")
+
+	cfg, err := LoadBot()
+	require.NoError(t, err)
+	assert.Equal(t, "https://pay.crypt.bot", cfg.CryptoPayURL)
+}
+
+func TestLoadBot_RequiresBothTokens(t *testing.T) {
+	isolateEnv(t)
+
+	_, err := LoadBot()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TELEGRAM_BOT_TOKEN")
+	assert.Contains(t, err.Error(), "CRYPTOPAY_TOKEN")
+}
+
+func TestLoadBot_ValidatesThePrice(t *testing.T) {
+	for _, price := range []string{"0", "-5", "10.999", "ten", "10.", ".5", "1e3", ""} {
+		t.Run(price, func(t *testing.T) {
+			setBotEnv(t)
+			if price == "" {
+				// An empty value means "use the default", so force a bad one.
+				t.Setenv("PRICE_USD", " ")
+			} else {
+				t.Setenv("PRICE_USD", price)
+			}
+
+			_, err := LoadBot()
+			require.Error(t, err, "price %q must be rejected", price)
+			assert.Contains(t, err.Error(), "PRICE_USD")
+		})
+	}
+
+	for _, price := range []string{"10", "9.99", "0.5"} {
+		t.Run("accepts "+price, func(t *testing.T) {
+			setBotEnv(t)
+			t.Setenv("PRICE_USD", price)
+			_, err := LoadBot()
+			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestLoadBot_RejectsAnUnknownNetwork(t *testing.T) {
+	setBotEnv(t)
+	t.Setenv("CRYPTOPAY_NETWORK", "devnet")
+
+	_, err := LoadBot()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CRYPTOPAY_NETWORK")
 }
