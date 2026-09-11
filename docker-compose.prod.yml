@@ -90,10 +90,35 @@ services:
     restart: unless-stopped
     logging: *logging
 
+  # In production the bot is part of the product, so it leaves its profile and
+  # starts with everything else.
+  bot:
+    profiles: !reset []
+    environment:
+      POSTGRES_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-shortlink}?sslmode=disable
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?set TELEGRAM_BOT_TOKEN in .env}
+      CRYPTOPAY_TOKEN: ${CRYPTOPAY_TOKEN:?set CRYPTOPAY_TOKEN in .env}
+      # Required here, never defaulted. Development defaults to testnet so a
+      # stray bot cannot take real money; production must not default either
+      # way, because a server left on testnet sells real access for test coins
+      # that cost nothing.
+      CRYPTOPAY_NETWORK: ${CRYPTOPAY_NETWORK:?set CRYPTOPAY_NETWORK to testnet or mainnet in .env}
+      BASE_URL: https://${SHORTLINK_DOMAIN}
+      PRICE_USD: ${PRICE_USD:-10}
+      ACCESS_DAYS: ${ACCESS_DAYS:-5}
+      MAX_KEYS_PER_USER: ${MAX_KEYS_PER_USER:-5}
+      CRYPTOPAY_ASSETS: ${CRYPTOPAY_ASSETS:-USDT,TON}
+      BOT_TIMEZONE: ${BOT_TIMEZONE:-Europe/Kyiv}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: json
+    restart: unless-stopped
+    logging: *logging
+
   caddy:
     image: caddy:2-alpine
     depends_on:
       - api
+      - bot
     ports:
       - "80:80"
       - "443:443"

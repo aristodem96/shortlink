@@ -16,15 +16,32 @@
 	# touching a dependency, and an external uptime monitor needs somewhere to
 	# knock.
 	@internal path /metrics /readyz
-	respond @internal 404
 
-	reverse_proxy api:8080 {
-		# Overwrite rather than append. Caddy already replaces a client-supplied
-		# X-Forwarded-For by default, but the service reads the left-most entry
-		# of that header, so if a future version ever appended instead, a client
-		# could put any address first and evade the per-IP rate limit. Setting
-		# both headers explicitly makes the guarantee independent of defaults.
-		header_up X-Forwarded-For {remote_host}
-		header_up X-Real-IP {remote_host}
+	# handle blocks are mutually exclusive, and the one without a matcher is
+	# always tried last -- which is what lets the 404 and the webhook route sit
+	# alongside a catch-all proxy without the catch-all swallowing them. A bare
+	# `respond` next to a bare `reverse_proxy` would not work: Caddy orders
+	# handle before respond, so /metrics would reach the API.
+	handle @internal {
+		respond 404
+	}
+
+	# Payment notifications go to the bot, which owns billing. The endpoint is
+	# public because Crypto Pay has to reach it; every delivery is checked
+	# against the HMAC signature before anything happens.
+	handle /webhooks/cryptopay {
+		reverse_proxy bot:8090
+	}
+
+	handle {
+		reverse_proxy api:8080 {
+			# Overwrite rather than append. Caddy already replaces a client-supplied
+			# X-Forwarded-For by default, but the service reads the left-most entry
+			# of that header, so if a future version ever appended instead, a client
+			# could put any address first and evade the per-IP rate limit. Setting
+			# both headers explicitly makes the guarantee independent of defaults.
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Real-IP {remote_host}
+		}
 	}
 }

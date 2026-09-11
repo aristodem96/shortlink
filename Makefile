@@ -26,14 +26,19 @@ help: ## Show this help
 		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: build
-build: ## Build the API server and the key CLI into ./bin
+build: ## Build the API server, the key CLI and the bot into ./bin
 	@mkdir -p $(BIN)
 	go build -trimpath -ldflags "-s -w" -o $(BIN)/api ./cmd/api
 	go build -trimpath -ldflags "-s -w" -o $(BIN)/shortlinkctl ./cmd/shortlinkctl
+	go build -trimpath -ldflags "-s -w" -o $(BIN)/bot ./cmd/bot
 
 .PHONY: run
 run: ## Run the API server locally (expects Postgres and Redis to be up)
 	go run ./cmd/api
+
+.PHONY: bot
+bot: ## Run the Telegram bot locally (needs TELEGRAM_BOT_TOKEN and CRYPTOPAY_TOKEN in .env)
+	go run ./cmd/bot
 
 .PHONY: test
 test: ## Run unit tests (integration tests are skipped without Docker)

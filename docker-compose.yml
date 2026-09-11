@@ -59,5 +59,38 @@ services:
       - "${API_PORT:-8080}:8080"
     restart: unless-stopped
 
+  # The Telegram bot that sells API access. Behind a profile because it needs
+  # two tokens the rest of the stack does not, so a plain `docker compose up`
+  # still works for anyone who has not set them. Start it with
+  # `docker compose --profile bot up -d`, or put COMPOSE_PROFILES=bot in .env.
+  bot:
+    profiles: ["bot"]
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+    entrypoint: ["/bot"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_DSN: postgres://shortlink:shortlink@postgres:5432/shortlink?sslmode=disable
+      # Not ${VAR:?}: compose interpolates every service, including ones behind
+      # an inactive profile, so a required variable here would break a plain
+      # `docker compose up` for anyone who never meant to run the bot. The bot
+      # validates its own configuration and names what is missing when it is
+      # actually started.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      CRYPTOPAY_TOKEN: ${CRYPTOPAY_TOKEN:-}
+      # Test coins unless deliberately changed.
+      CRYPTOPAY_NETWORK: ${CRYPTOPAY_NETWORK:-testnet}
+      BASE_URL: ${BASE_URL:-http://localhost:8080}
+      PRICE_USD: ${PRICE_USD:-10}
+      ACCESS_DAYS: ${ACCESS_DAYS:-5}
+      MAX_KEYS_PER_USER: ${MAX_KEYS_PER_USER:-5}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+    restart: unless-stopped
+
 volumes:
   pgdata:
