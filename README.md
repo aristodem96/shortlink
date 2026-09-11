@@ -537,7 +537,9 @@ make test-integration  # adds testcontainers-backed integration tests
 make cover             # HTML coverage report
 ```
 
-77.9% of statements overall; 87–100% in the packages that carry logic.
+74.3% of statements overall; 79–100% in the packages that carry logic. The
+composition roots under `cmd/` are at zero on purpose: they are wiring, and the
+thing that proves them is the stack coming up, not a unit test.
 
 **Unit tests** use hand-written fakes rather than generated mocks. The ports are
 small and the tests need behaviour — a repository that really stores links, a
@@ -601,6 +603,7 @@ internal/telegram     minimal Bot API client
 internal/storage/     postgres (pgx) and rediscache (cache + Lua limiter)
 internal/transport/   HTTP routing, middleware, JSON mapping
 internal/shortid      random base62 code generation
+internal/config       environment configuration for both binaries
 internal/observability  slog setup and Prometheus metrics
 migrations            embedded SQL, applied on start
 api                   embedded OpenAPI spec
