@@ -132,6 +132,10 @@ func (r *fakeLinkRepo) Stats(_ context.Context, linkID int64, _ time.Time) (*dom
 	return &domain.LinkStats{TotalClicks: linkID}, nil
 }
 
+func (r *fakeLinkRepo) ClickTotals(context.Context, int64, []int64) (map[int64]int64, error) {
+	return map[int64]int64{}, nil
+}
+
 // fakeCache is an in-memory LinkCache. A nil value marks a negative entry.
 type fakeCache struct {
 	mu      sync.Mutex

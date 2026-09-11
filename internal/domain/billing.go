@@ -11,6 +11,9 @@ var (
 	ErrNoAccess = errors.New("no active paid access")
 	// ErrKeyLimit means the user already holds the maximum number of live keys.
 	ErrKeyLimit = errors.New("api key limit reached")
+	// ErrNoActiveKey means the user has not chosen a key for the bot to act
+	// with, so it cannot shorten links on their behalf.
+	ErrNoActiveKey = errors.New("no active key selected")
 )
 
 // Subscription is a Telegram user's paid access window.

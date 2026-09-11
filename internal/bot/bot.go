@@ -15,6 +15,7 @@ import (
 
 	"github.com/aristodem96/shortlink/internal/billing"
 	"github.com/aristodem96/shortlink/internal/domain"
+	"github.com/aristodem96/shortlink/internal/service"
 	"github.com/aristodem96/shortlink/internal/telegram"
 )
 
@@ -33,19 +34,36 @@ type Billing interface {
 	Terms() billing.Config
 	Checkout(ctx context.Context, telegramUserID int64) (string, error)
 	Status(ctx context.Context, telegramUserID int64) (*domain.Subscription, error)
-	IssueKey(ctx context.Context, telegramUserID int64, name string) (string, *domain.APIKey, error)
+	IssueKey(ctx context.Context, telegramUserID int64, name string) (*billing.IssuedKey, error)
 	Keys(ctx context.Context, telegramUserID int64) ([]domain.APIKey, error)
 	RevokeKey(ctx context.Context, telegramUserID, keyID int64) error
+	ActiveKey(ctx context.Context, telegramUserID int64) (*domain.APIKey, error)
+	UsableKey(ctx context.Context, telegramUserID int64) (*domain.APIKey, error)
+	UseKey(ctx context.Context, telegramUserID int64, ref string) (*domain.APIKey, error)
+}
+
+// Links is what the bot needs from the link service. It is the same
+// service.LinkService the API uses, so a link made in the chat goes through
+// exactly the same validation -- the SSRF check, the reserved aliases, the
+// collision retry -- as one made over HTTP.
+type Links interface {
+	Create(ctx context.Context, in service.CreateLinkInput) (*domain.Link, error)
+	List(ctx context.Context, ownerID int64, limit, offset int) ([]domain.Link, int64, error)
+	Stats(ctx context.Context, ownerID int64, code string, window time.Duration) (*domain.LinkStats, error)
+	ClickTotals(ctx context.Context, ownerID int64, linkIDs []int64) (map[int64]int64, error)
 }
 
 // Commands is the menu registered with Telegram.
 var Commands = []telegram.Command{
-	{Command: "buy", Description: "Оплатити доступ до API"},
-	{Command: "newkey", Description: "Створити API-ключ"},
-	{Command: "keys", Description: "Мої ключі"},
-	{Command: "status", Description: "Скільки доступу лишилось"},
-	{Command: "revoke", Description: "Відкликати ключ"},
-	{Command: "help", Description: "Довідка"},
+	{Command: "links", Description: "Your links with their clicks"},
+	{Command: "stats", Description: "Detailed clicks for one link"},
+	{Command: "buy", Description: "Pay for API access"},
+	{Command: "newkey", Description: "Create an API key"},
+	{Command: "keys", Description: "Your keys"},
+	{Command: "usekey", Description: "Choose the key the bot uses for links"},
+	{Command: "status", Description: "How much access is left"},
+	{Command: "revoke", Description: "Revoke a key"},
+	{Command: "help", Description: "All commands"},
 }
 
 // Bot handles chat commands.
@@ -53,6 +71,7 @@ type Bot struct {
 	msg        Messenger
 	updates    UpdateSource
 	billing    Billing
+	links      Links
 	apiBaseURL string
 	loc        *time.Location
 	log        *slog.Logger
@@ -60,8 +79,8 @@ type Bot struct {
 }
 
 // New wires a Bot. loc is the time zone dates are shown in.
-func New(msg Messenger, updates UpdateSource, b Billing, apiBaseURL string, loc *time.Location, log *slog.Logger) *Bot {
-	return &Bot{msg: msg, updates: updates, billing: b, apiBaseURL: apiBaseURL, loc: loc, log: log, now: time.Now}
+func New(msg Messenger, updates UpdateSource, b Billing, links Links, apiBaseURL string, loc *time.Location, log *slog.Logger) *Bot {
+	return &Bot{msg: msg, updates: updates, billing: b, links: links, apiBaseURL: apiBaseURL, loc: loc, log: log, now: time.Now}
 }
 
 // Run long-polls for updates until ctx is cancelled.
@@ -138,16 +157,34 @@ func (b *Bot) Handle(ctx context.Context, u telegram.Update) {
 		return
 	}
 
-	command, args := parseCommand(m.Text)
 	user := m.From.ID
+	command, args := parseCommand(m.Text)
 
+	// A plain message is the common case: a link to shorten, or a key being
+	// pasted in to choose it. Anything else gets the help text.
+	if command == "" {
+		text := strings.TrimSpace(m.Text)
+		switch {
+		case looksLikeURL(text):
+			b.log.InfoContext(ctx, "shorten", slog.Int64("telegram_user_id", user))
+			b.shorten(ctx, user, text)
+		case strings.HasPrefix(text, service.KeyPrefix):
+			b.log.InfoContext(ctx, "use key by secret", slog.Int64("telegram_user_id", user))
+			b.useKey(ctx, user, text)
+		default:
+			b.reply(ctx, user, tplHelp)
+		}
+		return
+	}
+
+	// The command is logged, its arguments are not: /usekey can carry a secret.
 	b.log.InfoContext(ctx, "command", slog.String("command", command), slog.Int64("telegram_user_id", user))
 
 	switch command {
 	case "/start":
 		t := b.billing.Terms()
-		b.reply(ctx, user, fmt.Sprintf(tplStart, t.PriceUSD, t.AccessDays, t.MaxKeys, t.AccessDays))
-	case "/help", "":
+		b.reply(ctx, user, fmt.Sprintf(tplStart, t.PriceUSD, t.AccessDays, t.MaxKeys))
+	case "/help":
 		b.reply(ctx, user, tplHelp)
 	case "/buy":
 		b.buy(ctx, user)
@@ -157,8 +194,16 @@ func (b *Bot) Handle(ctx context.Context, u telegram.Update) {
 		b.newKey(ctx, user, args)
 	case "/keys":
 		b.keys(ctx, user)
+	case "/usekey":
+		b.useKey(ctx, user, args)
 	case "/revoke":
 		b.revoke(ctx, user, args)
+	case "/short":
+		b.shorten(ctx, user, args)
+	case "/links":
+		b.listLinks(ctx, user)
+	case "/stats":
+		b.stats(ctx, user, args)
 	default:
 		b.reply(ctx, user, msgUnknownCommand)
 	}
@@ -195,11 +240,17 @@ func (b *Bot) status(ctx context.Context, user int64) {
 		b.fail(ctx, user, "status keys", err)
 		return
 	}
-	b.reply(ctx, user, fmt.Sprintf(tplStatusActive, b.date(sub.PaidUntil), len(keys), b.billing.Terms().MaxKeys))
+
+	botKey := msgBotKeyNone
+	if active, err := b.billing.ActiveKey(ctx, user); err == nil {
+		botKey = fmt.Sprintf(tplBotKeyLine, active.ID, html.EscapeString(active.Name))
+	}
+
+	b.reply(ctx, user, fmt.Sprintf(tplStatusActive, b.date(sub.PaidUntil), len(keys), b.billing.Terms().MaxKeys, botKey))
 }
 
 func (b *Bot) newKey(ctx context.Context, user int64, name string) {
-	secret, key, err := b.billing.IssueKey(ctx, user, name)
+	issued, err := b.billing.IssueKey(ctx, user, name)
 
 	var validation *domain.ValidationError
 	switch {
@@ -218,12 +269,21 @@ func (b *Bot) newKey(ctx context.Context, user int64, name string) {
 	}
 
 	expires := ""
-	if key.ExpiresAt != nil {
-		expires = b.date(*key.ExpiresAt)
+	if issued.Key.ExpiresAt != nil {
+		expires = b.date(*issued.Key.ExpiresAt)
+	}
+
+	note := msgKeyActivated
+	if !issued.Activated {
+		note = ""
+		if active, err := b.billing.ActiveKey(ctx, user); err == nil {
+			note = fmt.Sprintf(tplKeyNotActivated, active.ID)
+		}
 	}
 
 	b.reply(ctx, user,
-		fmt.Sprintf(tplKeyIssued, html.EscapeString(key.Name), secret, expires, html.EscapeString(b.apiBaseURL)),
+		fmt.Sprintf(tplKeyIssued, html.EscapeString(issued.Key.Name), issued.Secret, expires,
+			html.EscapeString(b.apiBaseURL), note),
 		telegram.Button{Text: msgDocsButton, URL: b.apiBaseURL + "/docs"})
 }
 
@@ -238,6 +298,11 @@ func (b *Bot) keys(ctx context.Context, user int64) {
 		return
 	}
 
+	var activeID int64
+	if active, err := b.billing.ActiveKey(ctx, user); err == nil {
+		activeID = active.ID
+	}
+
 	var sb strings.Builder
 	fmt.Fprintf(&sb, tplKeysHeader, len(keys), b.billing.Terms().MaxKeys)
 	for _, k := range keys {
@@ -245,7 +310,11 @@ func (b *Bot) keys(ctx context.Context, user int64) {
 		if k.ExpiresAt != nil {
 			expires = b.date(*k.ExpiresAt)
 		}
-		fmt.Fprintf(&sb, tplKeyLine, k.ID, html.EscapeString(k.Name), expires)
+		marker := ""
+		if k.ID == activeID {
+			marker = keyBotMarker
+		}
+		fmt.Fprintf(&sb, tplKeyLine, k.ID, html.EscapeString(k.Name), expires, marker)
 	}
 	sb.WriteString(tplKeysFooter)
 
@@ -269,6 +338,181 @@ func (b *Bot) revoke(ctx context.Context, user int64, args string) {
 	}
 }
 
+func (b *Bot) useKey(ctx context.Context, user int64, ref string) {
+	if strings.TrimSpace(ref) == "" {
+		b.reply(ctx, user, msgUseKeyUsage)
+		return
+	}
+
+	key, err := b.billing.UseKey(ctx, user, ref)
+
+	var validation *domain.ValidationError
+	switch {
+	case errors.As(err, &validation):
+		b.reply(ctx, user, msgUseKeyUsage)
+	case errors.Is(err, domain.ErrNotFound):
+		b.reply(ctx, user, msgKeyNotFound)
+	case err != nil:
+		b.fail(ctx, user, "use key", err)
+	default:
+		b.reply(ctx, user, fmt.Sprintf(tplKeySelected, key.ID, html.EscapeString(key.Name)))
+	}
+}
+
+// usableKey resolves the key the bot acts with, or tells the user why there
+// isn't one and returns nil.
+func (b *Bot) usableKey(ctx context.Context, user int64) *domain.APIKey {
+	key, err := b.billing.UsableKey(ctx, user)
+	switch {
+	case errors.Is(err, domain.ErrNoActiveKey):
+		b.reply(ctx, user, msgNoKey)
+		return nil
+	case errors.Is(err, domain.ErrNoAccess):
+		b.reply(ctx, user, msgNoAccess)
+		return nil
+	case err != nil:
+		b.fail(ctx, user, "resolve key", err)
+		return nil
+	}
+	return key
+}
+
+// shorten turns "URL [alias]" into a short link owned by the bot's key.
+func (b *Bot) shorten(ctx context.Context, user int64, args string) {
+	target, alias, _ := strings.Cut(strings.TrimSpace(args), " ")
+	if target == "" {
+		b.reply(ctx, user, msgShortenUsage)
+		return
+	}
+
+	key := b.usableKey(ctx, user)
+	if key == nil {
+		return
+	}
+
+	link, err := b.links.Create(ctx, service.CreateLinkInput{
+		OwnerID:   key.ID,
+		TargetURL: target,
+		Alias:     strings.TrimSpace(alias),
+	})
+
+	var validation *domain.ValidationError
+	switch {
+	case errors.As(err, &validation):
+		b.reply(ctx, user, fmt.Sprintf(tplCannotShorten, html.EscapeString(validation.Reason)))
+		return
+	case errors.Is(err, domain.ErrAlreadyExists):
+		b.reply(ctx, user, msgAliasTaken)
+		return
+	case err != nil:
+		b.fail(ctx, user, "create link", err)
+		return
+	}
+
+	short := b.shortURL(link.Code)
+	b.reply(ctx, user,
+		fmt.Sprintf(tplShortened, html.EscapeString(short), html.EscapeString(link.TargetURL)),
+		telegram.Button{Text: msgOpenButton, URL: short})
+}
+
+const linksPageSize = 10
+
+func (b *Bot) listLinks(ctx context.Context, user int64) {
+	key := b.usableKey(ctx, user)
+	if key == nil {
+		return
+	}
+
+	links, total, err := b.links.List(ctx, key.ID, linksPageSize, 0)
+	if err != nil {
+		b.fail(ctx, user, "list links", err)
+		return
+	}
+	if len(links) == 0 {
+		b.reply(ctx, user, msgNoLinks)
+		return
+	}
+
+	ids := make([]int64, len(links))
+	for i, l := range links {
+		ids[i] = l.ID
+	}
+	// One query for the whole page, not one per link.
+	totals, err := b.links.ClickTotals(ctx, key.ID, ids)
+	if err != nil {
+		b.fail(ctx, user, "click totals", err)
+		return
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, tplLinksHeader, len(links), total)
+	for _, l := range links {
+		fmt.Fprintf(&sb, tplLinkLine, html.EscapeString(l.Code), clicks(totals[l.ID]),
+			html.EscapeString(ellipsize(l.TargetURL, 60)))
+	}
+	sb.WriteString(tplLinksFooter)
+
+	b.reply(ctx, user, sb.String())
+}
+
+const statsWindow = 30 * 24 * time.Hour
+
+func (b *Bot) stats(ctx context.Context, user int64, args string) {
+	code := linkCode(args)
+	if code == "" {
+		b.reply(ctx, user, msgStatsUsage)
+		return
+	}
+
+	key := b.usableKey(ctx, user)
+	if key == nil {
+		return
+	}
+
+	st, err := b.links.Stats(ctx, key.ID, code, statsWindow)
+	if errors.Is(err, domain.ErrNotFound) {
+		b.reply(ctx, user, msgLinkNotFound)
+		return
+	}
+	if err != nil {
+		b.fail(ctx, user, "link stats", err)
+		return
+	}
+
+	last := msgNever
+	if st.LastClickAt != nil {
+		last = b.date(*st.LastClickAt)
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, tplStats, html.EscapeString(st.Code), st.TotalClicks, st.UniqueVisitors, last)
+
+	if len(st.TopReferers) > 0 {
+		sb.WriteString(tplStatsReferrersHeader)
+		for _, r := range st.TopReferers {
+			// Referrers come from a request header any visitor controls.
+			fmt.Fprintf(&sb, tplStatsLine, html.EscapeString(ellipsize(r.Referer, 50)), r.Clicks)
+		}
+	}
+
+	if len(st.Daily) > 0 {
+		sb.WriteString(tplStatsDaysHeader)
+		days := st.Daily
+		if len(days) > 7 {
+			days = days[len(days)-7:] // the most recent week keeps the message short
+		}
+		for _, d := range days {
+			fmt.Fprintf(&sb, tplStatsLine, d.Day, d.Clicks)
+		}
+	}
+
+	b.reply(ctx, user, sb.String(), telegram.Button{Text: msgOpenButton, URL: b.shortURL(st.Code)})
+}
+
+func (b *Bot) shortURL(code string) string {
+	return b.apiBaseURL + "/" + code
+}
+
 // fail logs the real cause and shows the user a generic message: internal
 // errors carry table names and provider responses that are no business of a
 // chat.
@@ -283,8 +527,45 @@ func (b *Bot) reply(ctx context.Context, chatID int64, text string, buttons ...t
 	}
 }
 
+// dateLayout names the zone, so a date is never ambiguous to a reader in
+// another one.
+const dateLayout = "02 Jan 2006, 15:04 MST"
+
 func (b *Bot) date(t time.Time) string {
-	return t.In(b.loc).Format("02.01.2006 15:04")
+	return t.In(b.loc).Format(dateLayout)
+}
+
+// looksLikeURL is deliberately loose. Real validation -- scheme, host, the
+// private-network check -- happens in the link service, which then explains a
+// rejection; this only decides that a plain message was meant as a link.
+func looksLikeURL(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
+}
+
+// linkCode accepts a bare code or a whole short URL, since users will paste
+// whichever they have to hand.
+func linkCode(arg string) string {
+	arg = strings.TrimSpace(arg)
+	if i := strings.LastIndex(arg, "/"); i >= 0 {
+		arg = arg[i+1:]
+	}
+	return arg
+}
+
+func clicks(n int64) string {
+	if n == 1 {
+		return "1 click"
+	}
+	return strconv.FormatInt(n, 10) + " clicks"
+}
+
+func ellipsize(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max-1]) + "…"
 }
 
 // parseCommand splits "/newkey@ShortlinkBot my app" into "/newkey" and
@@ -317,5 +598,5 @@ func NewNotifier(msg Messenger, loc *time.Location) *Notifier {
 // PaymentConfirmed implements billing.Notifier. In a private chat the chat id
 // is the user id, so the buyer can be messaged without any stored chat state.
 func (n *Notifier) PaymentConfirmed(ctx context.Context, telegramUserID int64, paidUntil time.Time) error {
-	return n.msg.SendMessage(ctx, telegramUserID, fmt.Sprintf(tplPaid, paidUntil.In(n.loc).Format("02.01.2006 15:04")))
+	return n.msg.SendMessage(ctx, telegramUserID, fmt.Sprintf(tplPaid, paidUntil.In(n.loc).Format(dateLayout)))
 }

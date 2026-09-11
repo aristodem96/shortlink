@@ -185,7 +185,12 @@ func LoadDatabase() (*Postgres, error) {
 // Bot is the configuration of the Telegram bot process.
 type Bot struct {
 	Postgres Postgres
-	Log      Log
+	// Redis is needed because the bot creates links through the same service
+	// as the API, which clears a code's cached "not found" when it is taken.
+	Redis Redis
+	Log   Log
+	// CodeLength must match the API's, so links from the chat look the same.
+	CodeLength int
 
 	TelegramToken  string
 	CryptoPayToken string
@@ -224,10 +229,16 @@ func LoadBot() (*Bot, error) {
 			DSN:      envString("POSTGRES_DSN", "postgres://shortlink:shortlink@localhost:5432/shortlink?sslmode=disable"),
 			MaxConns: envInt32("POSTGRES_MAX_CONNS", 5, collect),
 		},
+		Redis: Redis{
+			Addr:     envString("REDIS_ADDR", "localhost:6379"),
+			Password: envString("REDIS_PASSWORD", ""),
+			DB:       envInt("REDIS_DB", 0, collect),
+		},
 		Log: Log{
 			Level:  strings.ToLower(envString("LOG_LEVEL", "info")),
 			Format: strings.ToLower(envString("LOG_FORMAT", "json")),
 		},
+		CodeLength:     envInt("CODE_LENGTH", 7, collect),
 		TelegramToken:  envString("TELEGRAM_BOT_TOKEN", ""),
 		CryptoPayToken: envString("CRYPTOPAY_TOKEN", ""),
 		// Testnet by default: a bot started without thinking about it must not
@@ -261,6 +272,8 @@ func LoadBot() (*Bot, error) {
 	require(cfg.TelegramToken != "", "TELEGRAM_BOT_TOKEN must be set")
 	require(cfg.CryptoPayToken != "", "CRYPTOPAY_TOKEN must be set")
 	require(cfg.Postgres.DSN != "", "POSTGRES_DSN must be set")
+	require(cfg.Redis.Addr != "", "REDIS_ADDR must be set")
+	require(cfg.CodeLength >= 4 && cfg.CodeLength <= 32, "CODE_LENGTH must be between 4 and 32")
 	require(isPositiveAmount(cfg.PriceUSD), "PRICE_USD must be a positive amount such as 10 or 9.99")
 	require(cfg.AccessDays > 0, "ACCESS_DAYS must be positive")
 	require(cfg.MaxKeys > 0, "MAX_KEYS_PER_USER must be positive")

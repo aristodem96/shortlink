@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -199,10 +200,10 @@ func (r *BillingRepository) Subscription(ctx context.Context, telegramUserID int
 // user's keys, both see room for one more, and both insert -- walking straight
 // past the limit. Locking the one row that every key issue and every renewal
 // for that user touches makes the check and the insert behave as one step.
-func (r *BillingRepository) IssueKey(ctx context.Context, telegramUserID int64, name string, hash []byte, maxKeys int) (*domain.APIKey, error) {
+func (r *BillingRepository) IssueKey(ctx context.Context, telegramUserID int64, name string, hash []byte, maxKeys int) (*domain.APIKey, bool, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: begin issue key: %w", err)
+		return nil, false, fmt.Errorf("postgres: begin issue key: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -216,20 +217,20 @@ func (r *BillingRepository) IssueKey(ctx context.Context, telegramUserID int64, 
 		WHERE telegram_user_id = $1
 		FOR UPDATE`, telegramUserID).Scan(&paidUntil, &active)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !active) {
-		return nil, domain.ErrNoAccess
+		return nil, false, domain.ErrNoAccess
 	}
 	if err != nil {
-		return nil, fmt.Errorf("postgres: lock subscription: %w", err)
+		return nil, false, fmt.Errorf("postgres: lock subscription: %w", err)
 	}
 
 	var live int
 	if err := tx.QueryRow(ctx, `
 		SELECT count(*) FROM api_keys
 		WHERE telegram_user_id = $1 AND revoked_at IS NULL`, telegramUserID).Scan(&live); err != nil {
-		return nil, fmt.Errorf("postgres: count keys: %w", err)
+		return nil, false, fmt.Errorf("postgres: count keys: %w", err)
 	}
 	if live >= maxKeys {
-		return nil, domain.ErrKeyLimit
+		return nil, false, domain.ErrKeyLimit
 	}
 
 	var key domain.APIKey
@@ -238,13 +239,23 @@ func (r *BillingRepository) IssueKey(ctx context.Context, telegramUserID int64, 
 		VALUES ($1, $2, $3, $4)
 		RETURNING `+apiKeyColumns, name, hash, telegramUserID, paidUntil).Scan(apiKeyDest(&key)...)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: insert key: %w", err)
+		return nil, false, fmt.Errorf("postgres: insert key: %w", err)
+	}
+
+	// The first key a user creates becomes the one the bot shortens links with,
+	// so /buy then /newkey is all it takes before sending a URL. A later key --
+	// perhaps made for a CI job -- leaves the choice alone; /usekey changes it.
+	tag, err := tx.Exec(ctx, `
+		UPDATE subscriptions SET active_key_id = $2
+		WHERE telegram_user_id = $1 AND active_key_id IS NULL`, telegramUserID, key.ID)
+	if err != nil {
+		return nil, false, fmt.Errorf("postgres: activate key: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("postgres: commit issue key: %w", err)
+		return nil, false, fmt.Errorf("postgres: commit issue key: %w", err)
 	}
-	return &key, nil
+	return &key, tag.RowsAffected() == 1, nil
 }
 
 // ListKeys returns the user's keys that have not been revoked.
@@ -272,8 +283,18 @@ func (r *BillingRepository) ListKeys(ctx context.Context, telegramUserID int64) 
 
 // RevokeKey disables one of the user's keys. A key that belongs to somebody
 // else reports as not found, the same way links do, so key ids cannot be probed.
+//
+// If the revoked key was the one the bot acts with, the bot moves on to the
+// user's newest remaining key -- or to none -- in the same transaction, so it can
+// never be left pointing at a key that no longer works.
 func (r *BillingRepository) RevokeKey(ctx context.Context, telegramUserID, keyID int64) error {
-	tag, err := r.pool.Exec(ctx, `
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("postgres: begin revoke key: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, `
 		UPDATE api_keys SET revoked_at = now()
 		WHERE id = $2 AND telegram_user_id = $1 AND revoked_at IS NULL`, telegramUserID, keyID)
 	if err != nil {
@@ -282,5 +303,85 @@ func (r *BillingRepository) RevokeKey(ctx context.Context, telegramUserID, keyID
 	if tag.RowsAffected() == 0 {
 		return domain.ErrNotFound
 	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE subscriptions
+		SET active_key_id = (
+			SELECT id FROM api_keys
+			WHERE telegram_user_id = $1 AND revoked_at IS NULL
+			ORDER BY id DESC
+			LIMIT 1
+		)
+		WHERE telegram_user_id = $1 AND active_key_id = $2`, telegramUserID, keyID); err != nil {
+		return fmt.Errorf("postgres: reassign active key: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("postgres: commit revoke key: %w", err)
+	}
 	return nil
+}
+
+// ActiveKey returns the key the bot acts with for this user, whatever its
+// state; deciding whether it is still usable is the service's job. It returns
+// domain.ErrNotFound when no key is chosen.
+func (r *BillingRepository) ActiveKey(ctx context.Context, telegramUserID int64) (*domain.APIKey, error) {
+	var key domain.APIKey
+	err := r.pool.QueryRow(ctx, `
+		SELECT `+prefixed("k", apiKeyColumns)+`
+		FROM subscriptions s
+		JOIN api_keys k ON k.id = s.active_key_id
+		WHERE s.telegram_user_id = $1`, telegramUserID).Scan(apiKeyDest(&key)...)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("postgres: active key: %w", err)
+	}
+	return &key, nil
+}
+
+// SetActiveKey points the bot at one of the user's live keys, by id.
+func (r *BillingRepository) SetActiveKey(ctx context.Context, telegramUserID, keyID int64) (*domain.APIKey, error) {
+	return r.setActive(ctx, telegramUserID, `k.id = $2`, keyID)
+}
+
+// SetActiveKeyByHash points the bot at one of the user's live keys, identified
+// by the hash of a secret the user pasted. The secret itself never reaches the
+// database, so choosing a key this way stores nothing sensitive.
+func (r *BillingRepository) SetActiveKeyByHash(ctx context.Context, telegramUserID int64, hash []byte) (*domain.APIKey, error) {
+	return r.setActive(ctx, telegramUserID, `k.key_hash = $2`, hash)
+}
+
+// setActive is shared by both lookups. Ownership is part of the WHERE clause,
+// not a separate check, so a user cannot activate somebody else's key by
+// guessing its id -- or an operator key, whose telegram_user_id is NULL.
+func (r *BillingRepository) setActive(ctx context.Context, telegramUserID int64, match string, arg any) (*domain.APIKey, error) {
+	var key domain.APIKey
+	err := r.pool.QueryRow(ctx, `
+		UPDATE subscriptions s
+		SET active_key_id = k.id
+		FROM api_keys k
+		WHERE s.telegram_user_id = $1
+		  AND k.telegram_user_id = $1
+		  AND k.revoked_at IS NULL
+		  AND `+match+`
+		RETURNING `+prefixed("k", apiKeyColumns), telegramUserID, arg).Scan(apiKeyDest(&key)...)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("postgres: set active key: %w", err)
+	}
+	return &key, nil
+}
+
+// prefixed qualifies each column in a comma-separated list with a table alias,
+// for queries that join api_keys to another table with overlapping names.
+func prefixed(alias, columns string) string {
+	parts := strings.Split(columns, ",")
+	for i, c := range parts {
+		parts[i] = alias + "." + strings.TrimSpace(c)
+	}
+	return strings.Join(parts, ", ")
 }

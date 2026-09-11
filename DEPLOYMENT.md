@@ -271,7 +271,8 @@ dcp logs bot | grep 'starting bot'     # confirms the network it is using
 ```
 
 In Telegram: `/start`, `/buy`, pay in @CryptoTestnetBot, wait for "✅", then
-`/newkey` and call the API with the key.
+`/newkey`. Send the bot any URL and it should answer with a short link; open it,
+then check `/links` and `/stats <code>` to see the click recorded.
 
 ### 5. Go live
 

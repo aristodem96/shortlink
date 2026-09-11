@@ -28,12 +28,15 @@ import (
 // fakeStore keeps only what these tests inspect. The locking and exactly-once
 // behaviour of the real store are tested against Postgres, not here.
 type fakeStore struct {
-	mu        sync.Mutex
-	payments  map[int64]*domain.Payment
-	confirmed map[int64]bool
-	confirmFn func(invoiceID int64) (*domain.Subscription, bool, error)
-	expired   []int64
-	issued    []string
+	mu          sync.Mutex
+	payments    map[int64]*domain.Payment
+	confirmed   map[int64]bool
+	confirmFn   func(invoiceID int64) (*domain.Subscription, bool, error)
+	expired     []int64
+	issued      []string
+	sub         *domain.Subscription
+	activeKey   *domain.APIKey
+	hashLookups [][]byte
 }
 
 func newFakeStore() *fakeStore {
@@ -94,14 +97,43 @@ func (s *fakeStore) PendingPayments(_ context.Context, _ time.Time, _ int) ([]do
 }
 
 func (s *fakeStore) Subscription(context.Context, int64) (*domain.Subscription, error) {
-	return nil, domain.ErrNotFound
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sub == nil {
+		return nil, domain.ErrNotFound
+	}
+	return s.sub, nil
 }
 
-func (s *fakeStore) IssueKey(_ context.Context, _ int64, name string, _ []byte, _ int) (*domain.APIKey, error) {
+func (s *fakeStore) IssueKey(_ context.Context, _ int64, name string, _ []byte, _ int) (*domain.APIKey, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.issued = append(s.issued, name)
-	return &domain.APIKey{ID: int64(len(s.issued)), Name: name}, nil
+	first := len(s.issued) == 1
+	return &domain.APIKey{ID: int64(len(s.issued)), Name: name}, first, nil
+}
+
+func (s *fakeStore) ActiveKey(context.Context, int64) (*domain.APIKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.activeKey == nil {
+		return nil, domain.ErrNotFound
+	}
+	return s.activeKey, nil
+}
+
+func (s *fakeStore) SetActiveKey(_ context.Context, _ int64, keyID int64) (*domain.APIKey, error) {
+	if keyID != 7 {
+		return nil, domain.ErrNotFound
+	}
+	return &domain.APIKey{ID: 7, Name: "chosen"}, nil
+}
+
+func (s *fakeStore) SetActiveKeyByHash(_ context.Context, _ int64, hash []byte) (*domain.APIKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hashLookups = append(s.hashLookups, hash)
+	return &domain.APIKey{ID: 8, Name: "by-secret"}, nil
 }
 
 func (s *fakeStore) ListKeys(context.Context, int64) ([]domain.APIKey, error) { return nil, nil }
@@ -265,18 +297,20 @@ func TestIssueKey_DefaultsAndLimitsTheName(t *testing.T) {
 	svc, store, _, _ := newService(t)
 	ctx := context.Background()
 
-	secret, key, err := svc.IssueKey(ctx, 42, "   ")
+	issued, err := svc.IssueKey(ctx, 42, "   ")
 	require.NoError(t, err)
-	assert.Equal(t, "telegram", key.Name, "an empty name gets a default rather than an empty label")
-	assert.Contains(t, secret, "sl_")
+	assert.Equal(t, "telegram", issued.Key.Name, "an empty name gets a default rather than an empty label")
+	assert.Contains(t, issued.Secret, "sl_")
+	assert.True(t, issued.Activated, "a user's first key becomes the one the bot uses")
 
-	_, key, err = svc.IssueKey(ctx, 42, "ci\x00\nbuild")
+	issued, err = svc.IssueKey(ctx, 42, "ci\x00\nbuild")
 	require.NoError(t, err)
-	assert.Equal(t, "cibuild", key.Name, "control characters from a chat message are stripped")
+	assert.Equal(t, "cibuild", issued.Key.Name, "control characters from a chat message are stripped")
+	assert.False(t, issued.Activated, "a later key leaves the choice alone")
 
 	// 41 visible characters. (string(make([]rune, 41)) would be 41 NULs, which
 	// are control characters and get stripped to nothing.)
-	_, _, err = svc.IssueKey(ctx, 42, strings.Repeat("a", 41))
+	_, err = svc.IssueKey(ctx, 42, strings.Repeat("a", 41))
 	var ve *domain.ValidationError
 	require.ErrorAs(t, err, &ve)
 	assert.Len(t, store.issued, 2, "an invalid name must not reach the store")
@@ -363,4 +397,81 @@ func TestWebhook_RejectsOtherMethods(t *testing.T) {
 	svc.WebhookHandler(webhookToken).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/webhooks/cryptopay", nil))
 
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
+func TestUsableKey_RefusesWhenThereIsNothingToUse(t *testing.T) {
+	t.Parallel()
+
+	t.Run("paid but no key created yet", func(t *testing.T) {
+		t.Parallel()
+		svc, store, _, _ := newService(t)
+		store.sub = &domain.Subscription{PaidUntil: time.Now().Add(time.Hour)}
+
+		_, err := svc.UsableKey(context.Background(), 42)
+		assert.ErrorIs(t, err, domain.ErrNoActiveKey, "the advice should be /newkey")
+	})
+
+	t.Run("never paid", func(t *testing.T) {
+		t.Parallel()
+		svc, _, _, _ := newService(t)
+
+		// Not ErrNoActiveKey: telling this user to run /newkey would only get
+		// them refused again.
+		_, err := svc.UsableKey(context.Background(), 42)
+		assert.ErrorIs(t, err, domain.ErrNoAccess, "the advice should be /buy")
+	})
+
+	t.Run("access ran out and no key is chosen", func(t *testing.T) {
+		t.Parallel()
+		svc, store, _, _ := newService(t)
+		store.sub = &domain.Subscription{PaidUntil: time.Now().Add(-time.Hour)}
+
+		_, err := svc.UsableKey(context.Background(), 42)
+		assert.ErrorIs(t, err, domain.ErrNoAccess)
+	})
+
+	t.Run("key has lapsed", func(t *testing.T) {
+		t.Parallel()
+		svc, store, _, _ := newService(t)
+		past := time.Now().Add(-time.Hour)
+		store.activeKey = &domain.APIKey{ID: 1, ExpiresAt: &past}
+
+		// The bot creates links in-process, bypassing the API's auth
+		// middleware, so this check is the only thing standing between an
+		// expired key and free use of the service.
+		_, err := svc.UsableKey(context.Background(), 42)
+		assert.ErrorIs(t, err, domain.ErrNoAccess)
+	})
+
+	t.Run("key is live", func(t *testing.T) {
+		t.Parallel()
+		svc, store, _, _ := newService(t)
+		future := time.Now().Add(time.Hour)
+		store.activeKey = &domain.APIKey{ID: 1, ExpiresAt: &future}
+
+		key, err := svc.UsableKey(context.Background(), 42)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), key.ID)
+	})
+}
+
+func TestUseKey_AcceptsANumberOrAPastedSecret(t *testing.T) {
+	t.Parallel()
+	svc, store, _, _ := newService(t)
+	ctx := context.Background()
+
+	key, err := svc.UseKey(ctx, 42, " 7 ")
+	require.NoError(t, err)
+	assert.Equal(t, int64(7), key.ID)
+
+	key, err = svc.UseKey(ctx, 42, "sl_pastedSecretValue")
+	require.NoError(t, err)
+	assert.Equal(t, int64(8), key.ID)
+	require.Len(t, store.hashLookups, 1)
+	assert.NotContains(t, string(store.hashLookups[0]), "sl_pastedSecretValue",
+		"a pasted secret is hashed before it reaches the store")
+
+	_, err = svc.UseKey(ctx, 42, "not-a-key")
+	var ve *domain.ValidationError
+	assert.ErrorAs(t, err, &ve)
 }

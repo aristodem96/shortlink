@@ -376,23 +376,51 @@ the binary so the published spec cannot drift from the build that serves it.
 
 ## Selling access through Telegram
 
-A Telegram bot sells time-limited API access. A user pays $10 in crypto through
-[@CryptoBot](https://t.me/CryptoBot), gets five days, and mints their own keys
-inside the chat. Every key they hold lives exactly as long as their paid access,
-and paying again extends all of them at once.
+A Telegram bot sells time-limited API access and doubles as a client for the
+service. A user pays $10 in crypto through [@CryptoBot](https://t.me/CryptoBot),
+gets five days, mints their own keys in the chat, and can shorten links and read
+their click statistics without ever touching the HTTP API.
 
 ```
-/buy      → invoice in @CryptoBot → paid → "✅ access until 17.09"
-/newkey   → sl_...  (shown once; only its hash is stored)
-/keys     → list, no secrets
-/revoke 3 → key 3 stops working
-/status   → time left, keys used
+/buy                         → invoice in @CryptoBot → paid → "✅ access until 17 Sep"
+/newkey                      → sl_...  (shown once; only its hash is stored)
+https://go.dev/blog/context  → 🔗 https://sho.rt/gen1234
+/links                       → your links, each with its click count
+/stats gen1234               → clicks, unique visitors, top referrers, by day
 ```
 
-The bot is a separate process (`cmd/bot`) that owns billing. The API only
-learned one new thing: a key can carry an expiry.
+Every key a user holds lives exactly as long as their paid access, and paying
+again extends all of them at once. The bot is a separate process (`cmd/bot`)
+that owns billing; the API only learned one new thing — a key can carry an
+expiry.
 
-### Confirming a payment exactly once
+### Shortening from the chat goes through the same service
+
+The bot does not call its own HTTP API; it uses `service.LinkService` in
+process. A link made by sending a URL to the chat passes exactly the checks one
+made over HTTP does — the SSRF refusal, the reserved aliases, the collision
+retry — because it is the same code, not a second implementation of the same
+rules.
+
+That does mean the bot bypasses the API's authentication middleware, so it has
+to make those checks itself: the key exists, belongs to this user, is not
+revoked, has not expired. Otherwise the chat would be a way to keep using the
+service after the access ran out. There is an end-to-end test for exactly that.
+
+### The bot never stores a secret
+
+To shorten links on a user's behalf the bot needs to know *which* key to act
+with, not what the key is. It issued those keys itself, so it records a
+reference: `subscriptions.active_key_id`. A user's first key becomes the bot's
+automatically — `/buy`, `/newkey`, send a URL — and `/usekey` switches it,
+either by the number from `/keys` or by pasting the key, which is hashed on
+arrival and matched against the stored hash.
+
+Revoking the key the bot is using hands it the user's next newest key in the
+same transaction, so it can never be left pointing at a key that no longer
+works.
+
+### Confirming a payment exactly once### Confirming a payment exactly once
 
 Payment providers redeliver webhooks they did not see acknowledged, and a
 webhook can also race the reconciler described below. Either way, one invoice can
@@ -464,8 +492,11 @@ requests against a limit of 3.
   have written full control of the bot into the logs.
 - **The time zone database is embedded.** The runtime image is distroless and has
   none, so `time.LoadLocation` would fail in production and nowhere else.
-- **User-supplied key names are HTML-escaped**, or a name like `<b>` would make
-  Telegram reject the very message carrying the secret.
+- **Everything interpolated into a message is HTML-escaped** — key names, target
+  URLs, and referrers, which arrive in a request header any visitor controls.
+  Unescaped, a value like `<b>` would make Telegram reject the very message
+  carrying the secret.
+- **Click counts for a page of links are one query**, not one per link.
 
 ---
 

@@ -35,6 +35,9 @@ type LinkRepository interface {
 	DeleteOwnedByCode(ctx context.Context, ownerID int64, code string) error
 	// Stats aggregates clicks for a link within [since, now].
 	Stats(ctx context.Context, linkID int64, since time.Time) (*domain.LinkStats, error)
+	// ClickTotals returns all-time click counts for the owner's links, keyed
+	// by link id. Links nobody has clicked are absent from the map.
+	ClickTotals(ctx context.Context, ownerID int64, linkIDs []int64) (map[int64]int64, error)
 }
 
 // LinkCache is the read-through cache in front of LinkRepository.

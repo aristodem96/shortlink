@@ -227,3 +227,31 @@ func collect[T any](results pgx.BatchResults, scan func(pgx.Rows) (T, error)) ([
 	}
 	return out, rows.Err()
 }
+
+// ClickTotals counts clicks for several links at once.
+//
+// The join on links.owner_id is what scopes it: the ids come from the caller,
+// and filtering by owner in the same statement means ids belonging to another
+// tenant simply produce no rows, instead of leaking their counts.
+func (r *LinkRepository) ClickTotals(ctx context.Context, ownerID int64, linkIDs []int64) (map[int64]int64, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT c.link_id, count(*)
+		FROM clicks c
+		JOIN links l ON l.id = c.link_id
+		WHERE l.owner_id = $1 AND c.link_id = ANY($2)
+		GROUP BY c.link_id`, ownerID, linkIDs)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: click totals: %w", err)
+	}
+	defer rows.Close()
+
+	totals := make(map[int64]int64, len(linkIDs))
+	for rows.Next() {
+		var id, n int64
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, fmt.Errorf("postgres: scan click total: %w", err)
+		}
+		totals[id] = n
+	}
+	return totals, rows.Err()
+}

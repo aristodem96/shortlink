@@ -94,8 +94,17 @@ services:
   # starts with everything else.
   bot:
     profiles: !reset []
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       POSTGRES_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-shortlink}?sslmode=disable
+      REDIS_HOST: redis
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      CODE_LENGTH: ${CODE_LENGTH:-7}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?set TELEGRAM_BOT_TOKEN in .env}
       CRYPTOPAY_TOKEN: ${CRYPTOPAY_TOKEN:?set CRYPTOPAY_TOKEN in .env}
       # Required here, never defaulted. Development defaults to testnet so a

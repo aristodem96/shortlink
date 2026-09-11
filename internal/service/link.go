@@ -335,3 +335,12 @@ func truncate(s string, max int) string {
 	}
 	return s[:max]
 }
+
+// ClickTotals returns all-time click counts for a page of the owner's links in
+// one query, rather than one Stats call per link.
+func (s *LinkService) ClickTotals(ctx context.Context, ownerID int64, linkIDs []int64) (map[int64]int64, error) {
+	if len(linkIDs) == 0 {
+		return map[int64]int64{}, nil
+	}
+	return s.repo.ClickTotals(ctx, ownerID, linkIDs)
+}

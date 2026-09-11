@@ -19,14 +19,19 @@ import (
 	// on a developer's machine. Embedding it costs about 450 KB.
 	_ "time/tzdata"
 
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/aristodem96/shortlink/internal/billing"
 	"github.com/aristodem96/shortlink/internal/bot"
 	"github.com/aristodem96/shortlink/internal/config"
 	"github.com/aristodem96/shortlink/internal/cryptopay"
+	"github.com/aristodem96/shortlink/internal/domain"
 	"github.com/aristodem96/shortlink/internal/observability"
+	"github.com/aristodem96/shortlink/internal/service"
+	"github.com/aristodem96/shortlink/internal/shortid"
 	"github.com/aristodem96/shortlink/internal/storage/postgres"
+	"github.com/aristodem96/shortlink/internal/storage/rediscache"
 	"github.com/aristodem96/shortlink/internal/telegram"
 )
 
@@ -71,6 +76,33 @@ func run() error {
 	}
 	defer pool.Close()
 
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     cfg.Redis.Addr,
+		Password: cfg.Redis.Password,
+		DB:       cfg.Redis.DB,
+	})
+	defer func() { _ = rdb.Close() }()
+	if err := rdb.Ping(startupCtx).Err(); err != nil {
+		return fmt.Errorf("ping redis: %w", err)
+	}
+
+	codes, err := shortid.NewGenerator(cfg.CodeLength)
+	if err != nil {
+		return err
+	}
+
+	// The same LinkService the API runs, so a link made in the chat passes the
+	// same validation as one made over HTTP.
+	links := service.NewLinkService(
+		postgres.NewLinkRepository(pool),
+		rediscache.NewLinkCache(rdb),
+		noClicks{},
+		codes,
+		noHasher{},
+		service.LinkServiceConfig{CacheTTL: time.Hour, NegativeCacheTTL: 30 * time.Second},
+		log,
+	)
+
 	tg := telegram.New(cfg.TelegramToken)
 	pay := cryptopay.New(cfg.CryptoPayURL, cfg.CryptoPayToken)
 
@@ -88,7 +120,7 @@ func run() error {
 		log,
 	)
 
-	b := bot.New(tg, tg, svc, cfg.APIBaseURL, loc, log)
+	b := bot.New(tg, tg, svc, links, cfg.APIBaseURL, loc, log)
 
 	// The menu is a convenience; a bot that cannot set it still works.
 	if err := tg.SetCommands(startupCtx, bot.Commands); err != nil {
@@ -162,3 +194,14 @@ func run() error {
 	log.Info("bot stopped")
 	return nil
 }
+
+// The bot never serves a redirect, so it never records a click or hashes a
+// visitor's address. LinkService takes both because the API needs them; these
+// satisfy the interfaces by doing nothing.
+type noClicks struct{}
+
+func (noClicks) Record(domain.Click) {}
+
+type noHasher struct{}
+
+func (noHasher) HashIP(string) []byte { return nil }

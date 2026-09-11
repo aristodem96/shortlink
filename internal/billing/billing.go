@@ -33,10 +33,18 @@ type Store interface {
 	PendingPayments(ctx context.Context, createdAfter time.Time, limit int) ([]domain.Payment, error)
 	Subscription(ctx context.Context, telegramUserID int64) (*domain.Subscription, error)
 	// IssueKey stores a key for a user with active access, returning
-	// domain.ErrNoAccess or domain.ErrKeyLimit otherwise.
-	IssueKey(ctx context.Context, telegramUserID int64, name string, hash []byte, maxKeys int) (*domain.APIKey, error)
+	// domain.ErrNoAccess or domain.ErrKeyLimit otherwise. activated reports
+	// whether the new key became the one the bot acts with.
+	IssueKey(ctx context.Context, telegramUserID int64, name string, hash []byte, maxKeys int) (key *domain.APIKey, activated bool, err error)
 	ListKeys(ctx context.Context, telegramUserID int64) ([]domain.APIKey, error)
 	RevokeKey(ctx context.Context, telegramUserID, keyID int64) error
+	// ActiveKey returns the key the bot acts with, whatever its state, or
+	// domain.ErrNotFound when none is chosen.
+	ActiveKey(ctx context.Context, telegramUserID int64) (*domain.APIKey, error)
+	// SetActiveKey and SetActiveKeyByHash choose one of the user's own live
+	// keys, returning domain.ErrNotFound for anything else.
+	SetActiveKey(ctx context.Context, telegramUserID, keyID int64) (*domain.APIKey, error)
+	SetActiveKeyByHash(ctx context.Context, telegramUserID int64, hash []byte) (*domain.APIKey, error)
 }
 
 // PaymentProvider issues and looks up invoices.
@@ -212,24 +220,89 @@ func (s *Service) Status(ctx context.Context, telegramUserID int64) (*domain.Sub
 	return s.store.Subscription(ctx, telegramUserID)
 }
 
-// IssueKey mints a key for a user with active access. The secret is returned
-// once and never stored.
-func (s *Service) IssueKey(ctx context.Context, telegramUserID int64, name string) (string, *domain.APIKey, error) {
+// IssuedKey is a freshly minted key. Secret is shown to the user once and
+// never stored.
+type IssuedKey struct {
+	Secret string
+	Key    *domain.APIKey
+	// Activated is true when this key became the one the bot shortens links
+	// with, which happens for a user's first key.
+	Activated bool
+}
+
+// IssueKey mints a key for a user with active access.
+func (s *Service) IssueKey(ctx context.Context, telegramUserID int64, name string) (*IssuedKey, error) {
 	name, err := normalizeKeyName(name)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 
 	secret, err := service.NewSecret()
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
 
-	key, err := s.store.IssueKey(ctx, telegramUserID, name, service.HashKey(secret), s.cfg.MaxKeys)
+	key, activated, err := s.store.IssueKey(ctx, telegramUserID, name, service.HashKey(secret), s.cfg.MaxKeys)
 	if err != nil {
-		return "", nil, err
+		return nil, err
 	}
-	return secret, key, nil
+	return &IssuedKey{Secret: secret, Key: key, Activated: activated}, nil
+}
+
+// ActiveKey returns the key the bot acts with, even if it has lapsed, for
+// display. domain.ErrNotFound means none is chosen.
+func (s *Service) ActiveKey(ctx context.Context, telegramUserID int64) (*domain.APIKey, error) {
+	return s.store.ActiveKey(ctx, telegramUserID)
+}
+
+// UsableKey returns the key the bot may act with right now.
+//
+// The bot creates links in-process rather than through the HTTP API, which
+// means it bypasses the API's authentication middleware. Every check that
+// middleware would make -- the key exists, it is not revoked, it has not
+// expired -- therefore has to be made here instead, or the bot would become a
+// way to use the service without paying.
+func (s *Service) UsableKey(ctx context.Context, telegramUserID int64) (*domain.APIKey, error) {
+	key, err := s.store.ActiveKey(ctx, telegramUserID)
+	if errors.Is(err, domain.ErrNotFound) {
+		// No key chosen has two very different causes, and sending the wrong
+		// advice wastes the user's time: somebody who never paid would be told
+		// to run /newkey, which then refuses them as well.
+		sub, subErr := s.store.Subscription(ctx, telegramUserID)
+		switch {
+		case errors.Is(subErr, domain.ErrNotFound):
+			return nil, domain.ErrNoAccess
+		case subErr != nil:
+			return nil, subErr
+		case !sub.IsActive(s.now()):
+			return nil, domain.ErrNoAccess
+		}
+		return nil, domain.ErrNoActiveKey
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !key.IsActive(s.now()) {
+		return nil, domain.ErrNoAccess
+	}
+	return key, nil
+}
+
+// UseKey chooses the key the bot acts with. ref is either a key number from
+// /keys or a pasted secret; a secret is hashed on arrival and only the hash is
+// used to find the key.
+func (s *Service) UseKey(ctx context.Context, telegramUserID int64, ref string) (*domain.APIKey, error) {
+	ref = strings.TrimSpace(ref)
+
+	if strings.HasPrefix(ref, service.KeyPrefix) {
+		return s.store.SetActiveKeyByHash(ctx, telegramUserID, service.HashKey(ref))
+	}
+
+	id, err := strconv.ParseInt(ref, 10, 64)
+	if err != nil || id <= 0 {
+		return nil, &domain.ValidationError{Field: "key", Reason: "give a key number from /keys, or paste the key itself"}
+	}
+	return s.store.SetActiveKey(ctx, telegramUserID, id)
 }
 
 // Keys lists the user's live keys. Secrets are not included -- only hashes are

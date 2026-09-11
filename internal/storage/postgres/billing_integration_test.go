@@ -136,7 +136,7 @@ func TestBilling_RenewalRevivesLapsedKeys(t *testing.T) {
 
 	_, _, err := repo.ConfirmPayment(ctx, pendingPayment(t, repo, 42, 5))
 	require.NoError(t, err)
-	key, err := repo.IssueKey(ctx, 42, "ci", []byte("hash-ci"), 5)
+	key, _, err := repo.IssueKey(ctx, 42, "ci", []byte("hash-ci"), 5)
 	require.NoError(t, err)
 
 	// Let the period lapse.
@@ -164,7 +164,7 @@ func TestBilling_RenewalLeavesRevokedKeysAlone(t *testing.T) {
 
 	_, _, err := repo.ConfirmPayment(ctx, pendingPayment(t, repo, 42, 5))
 	require.NoError(t, err)
-	key, err := repo.IssueKey(ctx, 42, "old", []byte("hash-old"), 5)
+	key, _, err := repo.IssueKey(ctx, 42, "old", []byte("hash-old"), 5)
 	require.NoError(t, err)
 	require.NoError(t, repo.RevokeKey(ctx, 42, key.ID))
 
@@ -201,7 +201,7 @@ func TestBilling_IssueKeyRequiresActiveAccess(t *testing.T) {
 	repo := setupBilling(t)
 	ctx := context.Background()
 
-	_, err := repo.IssueKey(ctx, 42, "ci", []byte("h1"), 5)
+	_, _, err := repo.IssueKey(ctx, 42, "ci", []byte("h1"), 5)
 	assert.ErrorIs(t, err, domain.ErrNoAccess, "never paid")
 
 	_, _, err = repo.ConfirmPayment(ctx, pendingPayment(t, repo, 42, 5))
@@ -209,7 +209,7 @@ func TestBilling_IssueKeyRequiresActiveAccess(t *testing.T) {
 	_, err = testPool.Exec(ctx, `UPDATE subscriptions SET paid_until = now() - interval '1 second' WHERE telegram_user_id = 42`)
 	require.NoError(t, err)
 
-	_, err = repo.IssueKey(ctx, 42, "ci", []byte("h2"), 5)
+	_, _, err = repo.IssueKey(ctx, 42, "ci", []byte("h2"), 5)
 	assert.ErrorIs(t, err, domain.ErrNoAccess, "paid, but the period is over")
 }
 
@@ -220,7 +220,7 @@ func TestBilling_IssuedKeyExpiresWithAccess(t *testing.T) {
 	sub, _, err := repo.ConfirmPayment(ctx, pendingPayment(t, repo, 42, 5))
 	require.NoError(t, err)
 
-	key, err := repo.IssueKey(ctx, 42, "ci", []byte("hash"), 5)
+	key, _, err := repo.IssueKey(ctx, 42, "ci", []byte("hash"), 5)
 	require.NoError(t, err)
 	require.NotNil(t, key.ExpiresAt)
 	require.NotNil(t, key.TelegramUserID)
@@ -253,7 +253,7 @@ func TestBilling_KeyLimitHoldsUnderConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, err := repo.IssueKey(ctx, 42, "k", []byte(fmt.Sprintf("hash-%d", i)), limit)
+			_, _, err := repo.IssueKey(ctx, 42, "k", []byte(fmt.Sprintf("hash-%d", i)), limit)
 			switch {
 			case err == nil:
 				issued.Add(1)
@@ -276,7 +276,7 @@ func TestBilling_RevokeIsScopedToTheOwner(t *testing.T) {
 
 	_, _, err := repo.ConfirmPayment(ctx, pendingPayment(t, repo, 42, 5))
 	require.NoError(t, err)
-	key, err := repo.IssueKey(ctx, 42, "mine", []byte("hash"), 5)
+	key, _, err := repo.IssueKey(ctx, 42, "mine", []byte("hash"), 5)
 	require.NoError(t, err)
 
 	assert.ErrorIs(t, repo.RevokeKey(ctx, 7, key.ID), domain.ErrNotFound, "another user cannot revoke it")
@@ -304,4 +304,109 @@ func TestBilling_PendingPaymentsSkipsSettledOnes(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
 	assert.Equal(t, open, pending[0].InvoiceID)
+}
+
+func TestBilling_TheFirstKeyBecomesTheBotKey(t *testing.T) {
+	repo := setupBilling(t)
+	ctx := context.Background()
+
+	_, _, err := repo.ConfirmPayment(ctx, pendingPayment(t, repo, 42, 5))
+	require.NoError(t, err)
+
+	_, err = repo.ActiveKey(ctx, 42)
+	assert.ErrorIs(t, err, domain.ErrNotFound, "nothing is chosen before there are keys")
+
+	first, activated, err := repo.IssueKey(ctx, 42, "first", []byte("h1"), 5)
+	require.NoError(t, err)
+	assert.True(t, activated, "so that /buy then /newkey is all it takes before sending a URL")
+
+	second, activated, err := repo.IssueKey(ctx, 42, "second", []byte("h2"), 5)
+	require.NoError(t, err)
+	assert.False(t, activated, "a later key -- say, one made for CI -- must not hijack the choice")
+
+	active, err := repo.ActiveKey(ctx, 42)
+	require.NoError(t, err)
+	assert.Equal(t, first.ID, active.ID)
+	assert.NotEqual(t, second.ID, active.ID)
+}
+
+func TestBilling_ChoosingTheBotKeyIsScopedToTheOwner(t *testing.T) {
+	repo := setupBilling(t)
+	ctx := context.Background()
+
+	_, _, err := repo.ConfirmPayment(ctx, pendingPayment(t, repo, 42, 5))
+	require.NoError(t, err)
+	_, _, err = repo.ConfirmPayment(ctx, pendingPayment(t, repo, 7, 5))
+	require.NoError(t, err)
+
+	mine, _, err := repo.IssueKey(ctx, 42, "mine", []byte("h-mine"), 5)
+	require.NoError(t, err)
+	theirs, _, err := repo.IssueKey(ctx, 7, "theirs", []byte("h-theirs"), 5)
+	require.NoError(t, err)
+
+	_, err = repo.SetActiveKey(ctx, 42, theirs.ID)
+	assert.ErrorIs(t, err, domain.ErrNotFound, "another user's key id must not be selectable")
+
+	chosen, err := repo.SetActiveKey(ctx, 42, mine.ID)
+	require.NoError(t, err)
+	assert.Equal(t, mine.ID, chosen.ID)
+
+	// By pasted secret, matched on its hash.
+	chosen, err = repo.SetActiveKeyByHash(ctx, 42, []byte("h-mine"))
+	require.NoError(t, err)
+	assert.Equal(t, mine.ID, chosen.ID)
+
+	_, err = repo.SetActiveKeyByHash(ctx, 42, []byte("h-theirs"))
+	assert.ErrorIs(t, err, domain.ErrNotFound)
+}
+
+// TestBilling_RevokingTheBotKeyHandsItAnother keeps the bot from being left
+// pointing at a key that no longer works.
+func TestBilling_RevokingTheBotKeyHandsItAnother(t *testing.T) {
+	repo := setupBilling(t)
+	ctx := context.Background()
+
+	_, _, err := repo.ConfirmPayment(ctx, pendingPayment(t, repo, 42, 5))
+	require.NoError(t, err)
+
+	first, _, err := repo.IssueKey(ctx, 42, "first", []byte("h1"), 5)
+	require.NoError(t, err)
+	second, _, err := repo.IssueKey(ctx, 42, "second", []byte("h2"), 5)
+	require.NoError(t, err)
+
+	require.NoError(t, repo.RevokeKey(ctx, 42, first.ID))
+
+	active, err := repo.ActiveKey(ctx, 42)
+	require.NoError(t, err)
+	assert.Equal(t, second.ID, active.ID, "the newest remaining key takes over")
+
+	require.NoError(t, repo.RevokeKey(ctx, 42, second.ID))
+	_, err = repo.ActiveKey(ctx, 42)
+	assert.ErrorIs(t, err, domain.ErrNotFound, "with no keys left, nothing is chosen")
+}
+
+func TestBilling_ClickTotalsAreScopedToTheOwner(t *testing.T) {
+	links, clicks, _, owner := setup(t)
+	ctx := context.Background()
+
+	mine := newLink(owner, "totals1", "https://example.com")
+	require.NoError(t, links.Create(ctx, mine))
+	quiet := newLink(owner, "totals2", "https://example.com/quiet")
+	require.NoError(t, links.Create(ctx, quiet))
+
+	now := time.Now().UTC()
+	require.NoError(t, clicks.InsertClicks(ctx, []domain.Click{
+		{LinkID: mine.ID, ClickedAt: now},
+		{LinkID: mine.ID, ClickedAt: now},
+	}))
+
+	totals, err := links.ClickTotals(ctx, owner.ID, []int64{mine.ID, quiet.ID})
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), totals[mine.ID])
+	assert.NotContains(t, totals, quiet.ID, "a link nobody clicked is simply absent")
+
+	// Another owner asking about the same ids gets nothing back.
+	totals, err = links.ClickTotals(ctx, owner.ID+999, []int64{mine.ID})
+	require.NoError(t, err)
+	assert.Empty(t, totals)
 }
