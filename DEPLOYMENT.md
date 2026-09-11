@@ -228,6 +228,69 @@ The graceful shutdown flushes buffered clicks before the old container exits.
 
 ---
 
+## The Telegram bot
+
+The bot sells API access and is part of the production stack. It needs two
+tokens and one setting in the Crypto Pay app.
+
+### 1. Create the bot
+
+Talk to [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the token
+it gives you into `.env` as `TELEGRAM_BOT_TOKEN`.
+
+### 2. Create a Crypto Pay app
+
+**Start on testnet.** Open [@CryptoTestnetBot](https://t.me/CryptoTestnetBot),
+go to *Crypto Pay → Create App*, and copy the token into `CRYPTOPAY_TOKEN`. Set
+`CRYPTOPAY_NETWORK=testnet`. Testnet is a full parallel system with coins that
+cost nothing, so the whole purchase can be walked through end to end.
+
+A testnet token only works against testnet, and a mainnet token only against
+mainnet — a mismatch fails every invoice with `UNAUTHORIZED`.
+
+### 3. Point the app's webhook at the server
+
+In the app's settings, under *Webhooks*, set:
+
+```
+https://links.example.com/webhooks/cryptopay
+```
+
+Caddy routes that path to the bot. Every delivery is verified against its HMAC
+signature, so the endpoint being public is safe.
+
+The webhook is the fast path. If it is missing or a delivery is lost, the bot's
+reconciler still settles the payment within about 20 seconds — so a payment that
+confirms slowly means the webhook is not configured, not that it failed.
+
+### 4. Start and try it
+
+```bash
+dcp up -d --build
+dcp logs bot | grep 'starting bot'     # confirms the network it is using
+```
+
+In Telegram: `/start`, `/buy`, pay in @CryptoTestnetBot, wait for "✅", then
+`/newkey` and call the API with the key.
+
+### 5. Go live
+
+Create a second app in [@CryptoBot](https://t.me/CryptoBot) for mainnet, set
+its webhook the same way, then in `.env`:
+
+```bash
+CRYPTOPAY_TOKEN=<the mainnet app token>
+CRYPTOPAY_NETWORK=mainnet
+```
+
+and `dcp up -d`. The log line from step 4 must now say `mainnet`.
+
+Before taking real money, check the legal side where you operate: selling a
+service is commercial activity, and in Ukraine that may mean registering as a
+sole proprietor (ФОП) for tax.
+
+---
+
 ## Backups
 
 The database lives in the `shortlink_pgdata` Docker volume, not in

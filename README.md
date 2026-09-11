@@ -24,6 +24,7 @@ GET /i8zjvlJ
 - [Architecture](#architecture)
 - [Design decisions](#design-decisions)
 - [API](#api)
+- [Selling access through Telegram](#selling-access-through-telegram)
 - [Configuration](#configuration)
 - [Testing](#testing)
 - [Out of scope](#out-of-scope)
@@ -373,6 +374,101 @@ the binary so the published spec cannot drift from the build that serves it.
 
 ---
 
+## Selling access through Telegram
+
+A Telegram bot sells time-limited API access. A user pays $10 in crypto through
+[@CryptoBot](https://t.me/CryptoBot), gets five days, and mints their own keys
+inside the chat. Every key they hold lives exactly as long as their paid access,
+and paying again extends all of them at once.
+
+```
+/buy      → invoice in @CryptoBot → paid → "✅ access until 17.09"
+/newkey   → sl_...  (shown once; only its hash is stored)
+/keys     → list, no secrets
+/revoke 3 → key 3 stops working
+/status   → time left, keys used
+```
+
+The bot is a separate process (`cmd/bot`) that owns billing. The API only
+learned one new thing: a key can carry an expiry.
+
+### Confirming a payment exactly once
+
+Payment providers redeliver webhooks they did not see acknowledged, and a
+webhook can also race the reconciler described below. Either way, one invoice can
+arrive for confirmation several times at once.
+
+Both paths call the same `ConfirmPayment`, whose guard is the `WHERE` clause of
+its first statement:
+
+```sql
+UPDATE payments SET status = 'paid', paid_at = now()
+WHERE invoice_id = $1 AND status <> 'paid'
+RETURNING telegram_user_id, access_days
+```
+
+The second caller blocks on the row lock the first holds; once the first
+commits it sees `paid` and updates nothing. No application lock, no window for
+double-granting. The integration suite fires 20 concurrent confirmations at one
+invoice and asserts exactly one succeeds and exactly five days are granted.
+
+The buyer is notified only by the call that made the change, so a webhook
+retried three times still sends one message.
+
+### A forged webhook is the obvious attack
+
+The webhook endpoint is public because Crypto Pay must reach it. Without
+verification anyone could `POST {"status": "paid"}` and get access for free.
+Every delivery is checked against an HMAC-SHA256 of the **raw** body — parsing
+and re-encoding the JSON would change the bytes and fail genuine deliveries —
+compared with `hmac.Equal`, in constant time, so the check does not leak how much
+of a forged signature was right.
+
+### Webhooks can be lost
+
+The service might be down, the network might drop a delivery, or the webhook URL
+might never have been configured. A reconciler asks the provider about recent
+pending invoices every 20 seconds and settles what changed. It is also what
+makes payments work in local development, where Crypto Pay has no public URL to
+deliver to.
+
+### The key limit holds when requests race
+
+Two `/newkey` messages arriving together would both count the user's keys, both
+see room, and both insert. `IssueKey` takes `SELECT ... FOR UPDATE` on the
+user's subscription row — the one row every key issue and every renewal touches —
+so the count and the insert behave as one step. Tested with 20 concurrent
+requests against a limit of 3.
+
+### Smaller decisions
+
+- **Testnet by default, mainnet never by default.** Locally the bot defaults to
+  testnet so a stray process cannot take money. The production overlay requires
+  `CRYPTOPAY_NETWORK` explicitly, because defaulting the other way is also
+  dangerous: a server left on testnet sells real access for coins that cost
+  nothing.
+- **Priced in USD, paid in crypto.** The invoice is fiat-denominated, so the coin
+  moving between invoice and payment is the buyer's concern, not the seller's.
+- **Private chats only.** `/newkey` in a group would post a secret to every
+  member.
+- **Renewal stacks.** `GREATEST(paid_until, now()) + 5 days`: paying early never
+  forfeits time already bought, and paying after a lapse restarts from now.
+- **Renewal revives lapsed keys**, so no integration needs a new secret — but
+  never revoked ones.
+- **Expired keys are rechecked after 5 seconds, not 30.** The auth cache holds a
+  refusal for 30 seconds, which is right for unknown and revoked keys. An expired
+  key comes back the moment its owner pays, and the moment after paying is
+  exactly when they try it.
+- **The bot token is redacted from errors.** It is part of every Bot API URL, and
+  `net/http` prints the URL in transport errors, so the first network blip would
+  have written full control of the bot into the logs.
+- **The time zone database is embedded.** The runtime image is distroless and has
+  none, so `time.LoadLocation` would fail in production and nowhere else.
+- **User-supplied key names are HTML-escaped**, or a name like `<b>` would make
+  Telegram reject the very message carrying the secret.
+
+---
+
 ## Configuration
 
 Everything comes from the environment; see [`.env.example`](.env.example) for
@@ -445,9 +541,14 @@ behind a CDN, and add a background sweep for expired links.
 ```
 cmd/api               composition root: wiring, signals, graceful shutdown
 cmd/shortlinkctl      operator CLI, shares the service packages
+cmd/bot               Telegram bot, payment webhook and reconciler
 internal/domain       entities, validation, sentinel errors — imports nothing local
 internal/service      use cases, ports, cache-aside, singleflight
 internal/analytics    click collector (worker pool) and IP pseudonymisation
+internal/billing      invoices, idempotent confirmation, user-issued keys
+internal/bot          Telegram commands and the buyer notifier
+internal/cryptopay    Crypto Pay client and webhook signature check
+internal/telegram     minimal Bot API client
 internal/storage/     postgres (pgx) and rediscache (cache + Lua limiter)
 internal/transport/   HTTP routing, middleware, JSON mapping
 internal/shortid      random base62 code generation
