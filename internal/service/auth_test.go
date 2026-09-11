@@ -42,12 +42,12 @@ func (r *fakeKeyRepo) GetByHash(_ context.Context, hash []byte) (*domain.APIKey,
 	return &copied, nil
 }
 
-func (r *fakeKeyRepo) Create(_ context.Context, name string, hash []byte) (*domain.APIKey, error) {
+func (r *fakeKeyRepo) Create(_ context.Context, name string, hash []byte, expiresAt *time.Time) (*domain.APIKey, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.nextID++
-	key := &domain.APIKey{ID: r.nextID, Name: name, CreatedAt: time.Now()}
+	key := &domain.APIKey{ID: r.nextID, Name: name, CreatedAt: time.Now(), ExpiresAt: expiresAt}
 	r.byHash[string(hash)] = key
 
 	copied := *key
@@ -80,7 +80,7 @@ func TestIssue_ProducesAUsableKey(t *testing.T) {
 	auth := NewAuthenticator(repo)
 	ctx := context.Background()
 
-	secret, key, err := auth.Issue(ctx, "ci")
+	secret, key, err := auth.Issue(ctx, "ci", nil)
 	require.NoError(t, err)
 
 	assert.True(t, strings.HasPrefix(secret, KeyPrefix), "secrets should be recognisable by their prefix")
@@ -96,7 +96,7 @@ func TestIssue_StoresOnlyTheHash(t *testing.T) {
 	t.Parallel()
 
 	repo := newFakeKeyRepo()
-	secret, _, err := NewAuthenticator(repo).Issue(context.Background(), "ci")
+	secret, _, err := NewAuthenticator(repo).Issue(context.Background(), "ci", nil)
 	require.NoError(t, err)
 
 	repo.mu.Lock()
@@ -111,7 +111,7 @@ func TestIssue_StoresOnlyTheHash(t *testing.T) {
 func TestIssue_RequiresAName(t *testing.T) {
 	t.Parallel()
 
-	_, _, err := NewAuthenticator(newFakeKeyRepo()).Issue(context.Background(), "   ")
+	_, _, err := NewAuthenticator(newFakeKeyRepo()).Issue(context.Background(), "   ", nil)
 
 	var ve *domain.ValidationError
 	require.ErrorAs(t, err, &ve)
@@ -145,7 +145,7 @@ func TestAuthenticate_RejectsARevokedKey(t *testing.T) {
 	auth := NewAuthenticator(repo)
 	ctx := context.Background()
 
-	secret, _, err := auth.Issue(ctx, "temporary")
+	secret, _, err := auth.Issue(ctx, "temporary", nil)
 	require.NoError(t, err)
 	repo.revoke(secret)
 
@@ -160,7 +160,7 @@ func TestAuthenticate_CachesSuccessfulLookups(t *testing.T) {
 	auth := NewAuthenticator(repo)
 	ctx := context.Background()
 
-	secret, _, err := auth.Issue(ctx, "ci")
+	secret, _, err := auth.Issue(ctx, "ci", nil)
 	require.NoError(t, err)
 
 	for i := 0; i < 20; i++ {
@@ -198,7 +198,7 @@ func TestAuthenticate_ReChecksAfterTheCacheExpires(t *testing.T) {
 	auth := NewAuthenticator(repo)
 	ctx := context.Background()
 
-	secret, _, err := auth.Issue(ctx, "ci")
+	secret, _, err := auth.Issue(ctx, "ci", nil)
 	require.NoError(t, err)
 
 	_, err = auth.Authenticate(ctx, secret)
@@ -222,7 +222,7 @@ func TestAuthenticate_IsSafeUnderConcurrency(t *testing.T) {
 	auth := NewAuthenticator(repo)
 	ctx := context.Background()
 
-	secret, _, err := auth.Issue(ctx, "ci")
+	secret, _, err := auth.Issue(ctx, "ci", nil)
 	require.NoError(t, err)
 
 	var wg sync.WaitGroup
@@ -279,7 +279,7 @@ func TestAuthenticate_RejectsAnExpiredKey(t *testing.T) {
 	auth := NewAuthenticator(repo)
 	ctx := context.Background()
 
-	secret, _, err := auth.Issue(ctx, "bought")
+	secret, _, err := auth.Issue(ctx, "bought", nil)
 	require.NoError(t, err)
 	repo.setExpiry(secret, time.Now().Add(-time.Minute))
 
@@ -296,7 +296,7 @@ func TestAuthenticate_ExpiryIsExactDespiteTheCache(t *testing.T) {
 	auth := NewAuthenticator(repo)
 	ctx := context.Background()
 
-	secret, _, err := auth.Issue(ctx, "bought")
+	secret, _, err := auth.Issue(ctx, "bought", nil)
 	require.NoError(t, err)
 
 	now := time.Now()
@@ -323,7 +323,7 @@ func TestAuthenticate_RenewalTakesEffectImmediately(t *testing.T) {
 	auth := NewAuthenticator(repo)
 	ctx := context.Background()
 
-	secret, _, err := auth.Issue(ctx, "bought")
+	secret, _, err := auth.Issue(ctx, "bought", nil)
 	require.NoError(t, err)
 
 	now := time.Now()
@@ -344,7 +344,7 @@ func TestAuthenticate_OperatorKeysNeverExpire(t *testing.T) {
 	repo := newFakeKeyRepo()
 	auth := NewAuthenticator(repo)
 
-	secret, key, err := auth.Issue(context.Background(), "operator")
+	secret, key, err := auth.Issue(context.Background(), "operator", nil)
 	require.NoError(t, err)
 	assert.Nil(t, key.ExpiresAt, "keys from shortlinkctl carry no expiry")
 
@@ -364,7 +364,7 @@ func TestAuthenticate_RenewalAfterARefusalIsNotBlockedForLong(t *testing.T) {
 	auth := NewAuthenticator(repo)
 	ctx := context.Background()
 
-	secret, _, err := auth.Issue(ctx, "bought")
+	secret, _, err := auth.Issue(ctx, "bought", nil)
 	require.NoError(t, err)
 
 	now := time.Now()
@@ -390,7 +390,7 @@ func TestAuthenticate_RevokedKeysStayRefusedForTheFullTTL(t *testing.T) {
 	auth := NewAuthenticator(repo)
 	ctx := context.Background()
 
-	secret, _, err := auth.Issue(ctx, "gone")
+	secret, _, err := auth.Issue(ctx, "gone", nil)
 	require.NoError(t, err)
 	repo.revoke(secret)
 
@@ -402,4 +402,31 @@ func TestAuthenticate_RevokedKeysStayRefusedForTheFullTTL(t *testing.T) {
 	_, err = auth.Authenticate(ctx, secret)
 	require.ErrorIs(t, err, domain.ErrUnauthorized)
 	assert.Equal(t, lookups, repo.lookups.Load(), "a revoked key is served from the negative cache, not re-read")
+}
+
+// TestIssue_ExpiryIsOptionalAndHonoured: the CLI and the bot are the two ways a
+// key is born, and the only difference between them is this argument. Both end
+// up as the same row, judged by the same IsActive.
+func TestIssue_ExpiryIsOptionalAndHonoured(t *testing.T) {
+	t.Parallel()
+
+	auth := NewAuthenticator(newFakeKeyRepo())
+	ctx := context.Background()
+
+	_, operator, err := auth.Issue(ctx, "operator", nil)
+	require.NoError(t, err)
+	assert.Nil(t, operator.ExpiresAt, "no expiry is a real state, not a date far in the future")
+	assert.True(t, operator.IsActive(time.Now().Add(10*365*24*time.Hour)))
+
+	until := time.Now().Add(5 * 24 * time.Hour)
+	secret, limited, err := auth.Issue(ctx, "temporary", &until)
+	require.NoError(t, err)
+	require.NotNil(t, limited.ExpiresAt)
+	assert.True(t, limited.IsActive(time.Now()))
+	assert.False(t, limited.IsActive(until.Add(time.Second)))
+
+	// And it is refused at the door once it lapses, exactly as a bot key is.
+	auth.now = func() time.Time { return until.Add(time.Second) }
+	_, err = auth.Authenticate(ctx, secret)
+	assert.ErrorIs(t, err, domain.ErrUnauthorized)
 }

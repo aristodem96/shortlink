@@ -407,6 +407,24 @@ to make those checks itself: the key exists, belongs to this user, is not
 revoked, has not expired. Otherwise the chat would be a way to keep using the
 service after the access ran out. There is an end-to-end test for exactly that.
 
+### One kind of key, two ways to get one
+
+Keys are not two species. `shortlinkctl issue-key` and the bot's `/newkey`
+write the same row and produce a key judged by the same `IsActive`; the only
+difference between them is one optional column:
+
+| | `shortlinkctl issue-key` | bot `/newkey` |
+|---|---|---|
+| Expiry | none, or `-days N` | the end of the buyer's paid access |
+| Owner | none — an operator key | the Telegram user who paid |
+| Counts against the key limit | no | yes |
+
+So an operator can hand out a trial the bot would have sold
+(`issue-key -name trial -days 5`), and a key bought in the chat is not a special
+case the API has to know about. "No expiry" is stored as NULL rather than a date
+in the year 3000, because it is a real state of a key and not a very long
+subscription.
+
 ### The bot never stores a secret
 
 To shorten links on a user's behalf the bot needs to know *which* key to act

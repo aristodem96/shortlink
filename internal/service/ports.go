@@ -71,5 +71,8 @@ type IPHasher interface {
 type APIKeyRepository interface {
 	// GetByHash returns domain.ErrNotFound when the hash is unknown.
 	GetByHash(ctx context.Context, hash []byte) (*domain.APIKey, error)
-	Create(ctx context.Context, name string, hash []byte) (*domain.APIKey, error)
+	// Create stores a key. expiresAt is nil for a key that never expires,
+	// which is what the operator CLI issues; keys sold through the bot carry
+	// the end of the buyer's paid access.
+	Create(ctx context.Context, name string, hash []byte, expiresAt *time.Time) (*domain.APIKey, error)
 }

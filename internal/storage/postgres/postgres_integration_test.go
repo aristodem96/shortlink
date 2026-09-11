@@ -103,7 +103,7 @@ func setup(t *testing.T) (*LinkRepository, *ClickRepository, *APIKeyRepository, 
 	require.NoError(t, err)
 
 	keys := NewAPIKeyRepository(testPool)
-	owner, err := keys.Create(ctx, "test-owner", []byte("hash-"+t.Name()))
+	owner, err := keys.Create(ctx, "test-owner", []byte("hash-"+t.Name()), nil)
 	require.NoError(t, err)
 
 	return NewLinkRepository(testPool), NewClickRepository(testPool), keys, owner
@@ -172,7 +172,7 @@ func TestLinkRepository_ScopesReadsAndDeletesToTheOwner(t *testing.T) {
 	links, _, keys, owner := setup(t)
 	ctx := context.Background()
 
-	stranger, err := keys.Create(ctx, "stranger", []byte("stranger-hash"))
+	stranger, err := keys.Create(ctx, "stranger", []byte("stranger-hash"), nil)
 	require.NoError(t, err)
 
 	require.NoError(t, links.Create(ctx, newLink(owner, "owned12", "https://example.com")))
@@ -341,7 +341,7 @@ func TestAPIKeyRepository(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("finds a key by hash", func(t *testing.T) {
-		created, err := keys.Create(ctx, "findable", []byte("findable-hash"))
+		created, err := keys.Create(ctx, "findable", []byte("findable-hash"), nil)
 		require.NoError(t, err)
 
 		got, err := keys.GetByHash(ctx, []byte("findable-hash"))
@@ -357,15 +357,15 @@ func TestAPIKeyRepository(t *testing.T) {
 	})
 
 	t.Run("rejects a duplicate hash", func(t *testing.T) {
-		_, err := keys.Create(ctx, "another", []byte("shared-hash"))
+		_, err := keys.Create(ctx, "another", []byte("shared-hash"), nil)
 		require.NoError(t, err)
 
-		_, err = keys.Create(ctx, "clash", []byte("shared-hash"))
+		_, err = keys.Create(ctx, "clash", []byte("shared-hash"), nil)
 		assert.ErrorIs(t, err, domain.ErrAlreadyExists)
 	})
 
 	t.Run("round-trips revocation", func(t *testing.T) {
-		key, err := keys.Create(ctx, "revocable", []byte("revocable-hash"))
+		key, err := keys.Create(ctx, "revocable", []byte("revocable-hash"), nil)
 		require.NoError(t, err)
 		assert.True(t, key.IsActive(time.Now()))
 
@@ -388,4 +388,27 @@ func TestMigrate_IsIdempotent(t *testing.T) {
 	// because the server applies them on every start.
 	assert.NoError(t, Migrate(context.Background(), testPool.Config().ConnString(),
 		slog.New(slog.NewTextHandler(io.Discard, nil))))
+}
+
+// TestAPIKeyRepository_ExpiryRoundTrips checks the column both key paths share.
+func TestAPIKeyRepository_ExpiryRoundTrips(t *testing.T) {
+	_, _, keys, _ := setup(t)
+	ctx := context.Background()
+
+	forever, err := keys.Create(ctx, "operator", []byte("hash-forever"), nil)
+	require.NoError(t, err)
+	assert.Nil(t, forever.ExpiresAt)
+	assert.Nil(t, forever.TelegramUserID, "a key issued by the CLI has no buyer")
+
+	until := time.Now().Add(5 * 24 * time.Hour).UTC().Truncate(time.Microsecond)
+	limited, err := keys.Create(ctx, "temporary", []byte("hash-limited"), &until)
+	require.NoError(t, err)
+	require.NotNil(t, limited.ExpiresAt)
+	assert.True(t, until.Equal(*limited.ExpiresAt), "want %s, got %s", until, *limited.ExpiresAt)
+
+	// Read back through the path authentication uses.
+	got, err := keys.GetByHash(ctx, []byte("hash-limited"))
+	require.NoError(t, err)
+	require.NotNil(t, got.ExpiresAt)
+	assert.True(t, until.Equal(*got.ExpiresAt))
 }

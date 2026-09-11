@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -42,14 +43,14 @@ func (r *APIKeyRepository) GetByHash(ctx context.Context, hash []byte) (*domain.
 }
 
 // Create stores a new API key.
-func (r *APIKeyRepository) Create(ctx context.Context, name string, hash []byte) (*domain.APIKey, error) {
+func (r *APIKeyRepository) Create(ctx context.Context, name string, hash []byte, expiresAt *time.Time) (*domain.APIKey, error) {
 	const query = `
-		INSERT INTO api_keys (name, key_hash)
-		VALUES ($1, $2)
+		INSERT INTO api_keys (name, key_hash, expires_at)
+		VALUES ($1, $2, $3)
 		RETURNING ` + apiKeyColumns
 
 	var key domain.APIKey
-	err := r.pool.QueryRow(ctx, query, name, hash).Scan(apiKeyDest(&key)...)
+	err := r.pool.QueryRow(ctx, query, name, hash, expiresAt).Scan(apiKeyDest(&key)...)
 	if isUniqueViolation(err) {
 		return nil, domain.ErrAlreadyExists
 	}

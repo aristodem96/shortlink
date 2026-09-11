@@ -130,7 +130,13 @@ func NewSecret() (string, error) {
 
 // Issue creates a new API key and returns the secret. The secret is returned
 // exactly once; only its hash is stored.
-func (a *Authenticator) Issue(ctx context.Context, name string) (string, *domain.APIKey, error) {
+//
+// expiresAt is optional and is the one thing that distinguishes the two ways a
+// key can come into being. The bot sets it to the end of a buyer's paid access;
+// the operator CLI leaves it nil for a key that never expires, and may set it
+// to hand out time-limited access by hand. Both end up as the same row, checked
+// by the same IsActive, so there is no second notion of a key to keep in step.
+func (a *Authenticator) Issue(ctx context.Context, name string, expiresAt *time.Time) (string, *domain.APIKey, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return "", nil, &domain.ValidationError{Field: "name", Reason: "must not be empty"}
@@ -141,7 +147,7 @@ func (a *Authenticator) Issue(ctx context.Context, name string) (string, *domain
 		return "", nil, err
 	}
 
-	key, err := a.repo.Create(ctx, name, HashKey(secret))
+	key, err := a.repo.Create(ctx, name, HashKey(secret), expiresAt)
 	if err != nil {
 		return "", nil, err
 	}

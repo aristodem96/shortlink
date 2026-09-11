@@ -216,6 +216,7 @@ alias dcp='docker compose -f docker-compose.yml -f docker-compose.prod.yml'
 | Follow the logs | `dcp logs -f api` |
 | Service status | `dcp ps` |
 | Issue a key | `dcp exec api /shortlinkctl issue-key -name <label>` |
+| Issue a time-limited key | `dcp exec api /shortlinkctl issue-key -name <label> -days 5` |
 | Open a database shell | `dcp exec postgres psql -U shortlink shortlink` |
 | Restart one service | `dcp restart api` |
 | Stop everything | `dcp down` |
