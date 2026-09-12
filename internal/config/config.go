@@ -192,7 +192,11 @@ type Bot struct {
 	// CodeLength must match the API's, so links from the chat look the same.
 	CodeLength int
 
-	TelegramToken  string
+	TelegramToken string
+	// TelegramAPIURL is the Bot API endpoint. Telegram publishes the server
+	// itself, so a deployment may run its own; it is also what lets the whole
+	// conversation be exercised against a stand-in.
+	TelegramAPIURL string
 	CryptoPayToken string
 	// CryptoPayURL is the provider base URL, derived from CRYPTOPAY_NETWORK.
 	CryptoPayURL string
@@ -240,6 +244,7 @@ func LoadBot() (*Bot, error) {
 		},
 		CodeLength:     envInt("CODE_LENGTH", 7, collect),
 		TelegramToken:  envString("TELEGRAM_BOT_TOKEN", ""),
+		TelegramAPIURL: envString("TELEGRAM_API_URL", "https://api.telegram.org"),
 		CryptoPayToken: envString("CRYPTOPAY_TOKEN", ""),
 		// Testnet by default: a bot started without thinking about it must not
 		// be able to take real money. Mainnet is always a deliberate choice.
@@ -270,6 +275,7 @@ func LoadBot() (*Bot, error) {
 		}
 	}
 	require(cfg.TelegramToken != "", "TELEGRAM_BOT_TOKEN must be set")
+	require(cfg.TelegramAPIURL != "", "TELEGRAM_API_URL must be set")
 	require(cfg.CryptoPayToken != "", "CRYPTOPAY_TOKEN must be set")
 	require(cfg.Postgres.DSN != "", "POSTGRES_DSN must be set")
 	require(cfg.Redis.Addr != "", "REDIS_ADDR must be set")

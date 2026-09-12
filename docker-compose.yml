@@ -70,17 +70,30 @@ services:
       args:
         VERSION: ${VERSION:-dev}
     entrypoint: ["/bot"]
+    # Published in development so the payment webhook can be exercised locally,
+    # by hand or through a tunnel. The production overlay does not publish it:
+    # there Caddy is the only way in.
+    ports:
+      - "${BOT_PORT:-8090}:8090"
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       POSTGRES_DSN: postgres://shortlink:shortlink@postgres:5432/shortlink?sslmode=disable
+      # The bot shortens links through the same service as the API, which clears
+      # a code's cached "not found" the moment that code is taken.
+      REDIS_ADDR: redis:6379
+      # Must match the API's, so links made in the chat look like the rest.
+      CODE_LENGTH: ${CODE_LENGTH:-7}
       # Not ${VAR:?}: compose interpolates every service, including ones behind
       # an inactive profile, so a required variable here would break a plain
       # `docker compose up` for anyone who never meant to run the bot. The bot
       # validates its own configuration and names what is missing when it is
       # actually started.
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_API_URL: ${TELEGRAM_API_URL:-https://api.telegram.org}
       CRYPTOPAY_TOKEN: ${CRYPTOPAY_TOKEN:-}
       # Test coins unless deliberately changed.
       CRYPTOPAY_NETWORK: ${CRYPTOPAY_NETWORK:-testnet}

@@ -94,6 +94,7 @@ services:
   # starts with everything else.
   bot:
     profiles: !reset []
+    ports: !reset []
     depends_on:
       postgres:
         condition: service_healthy

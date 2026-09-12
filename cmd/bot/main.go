@@ -103,7 +103,7 @@ func run() error {
 		log,
 	)
 
-	tg := telegram.New(cfg.TelegramToken)
+	tg := telegram.NewWithBaseURL(cfg.TelegramAPIURL, cfg.TelegramToken)
 	pay := cryptopay.New(cfg.CryptoPayURL, cfg.CryptoPayToken)
 
 	svc := billing.New(
