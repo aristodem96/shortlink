@@ -101,6 +101,12 @@ services:
       PRICE_USD: ${PRICE_USD:-10}
       ACCESS_DAYS: ${ACCESS_DAYS:-5}
       MAX_KEYS_PER_USER: ${MAX_KEYS_PER_USER:-5}
+      CRYPTOPAY_ASSETS: ${CRYPTOPAY_ASSETS:-USDT,TON}
+      INVOICE_TTL: ${INVOICE_TTL:-1h}
+      # Locally this is what makes payments land at all: Crypto Pay has no public
+      # URL to deliver a webhook to, so the invoice is confirmed by polling.
+      RECONCILE_INTERVAL: ${RECONCILE_INTERVAL:-20s}
+      BOT_TIMEZONE: ${BOT_TIMEZONE:-Europe/Kyiv}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_FORMAT: ${LOG_FORMAT:-json}
     restart: unless-stopped

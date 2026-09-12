@@ -102,7 +102,6 @@ services:
         condition: service_healthy
     environment:
       POSTGRES_DSN: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-shortlink}?sslmode=disable
-      REDIS_HOST: redis
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD}
       CODE_LENGTH: ${CODE_LENGTH:-7}
@@ -118,6 +117,8 @@ services:
       ACCESS_DAYS: ${ACCESS_DAYS:-5}
       MAX_KEYS_PER_USER: ${MAX_KEYS_PER_USER:-5}
       CRYPTOPAY_ASSETS: ${CRYPTOPAY_ASSETS:-USDT,TON}
+      INVOICE_TTL: ${INVOICE_TTL:-1h}
+      RECONCILE_INTERVAL: ${RECONCILE_INTERVAL:-20s}
       BOT_TIMEZONE: ${BOT_TIMEZONE:-Europe/Kyiv}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_FORMAT: json
