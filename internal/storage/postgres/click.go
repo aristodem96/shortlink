@@ -7,7 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/aristodem96/shortlink/internal/domain"
+	"shortlink/internal/domain"
 )
 
 // ClickRepository writes redirect events. It satisfies analytics.ClickWriter.

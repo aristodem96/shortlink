@@ -14,9 +14,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/aristodem96/shortlink/internal/config"
-	"github.com/aristodem96/shortlink/internal/service"
-	"github.com/aristodem96/shortlink/internal/storage/postgres"
+	"shortlink/internal/config"
+	"shortlink/internal/service"
+	"shortlink/internal/storage/postgres"
 )
 
 func main() {

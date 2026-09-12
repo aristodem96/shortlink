@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aristodem96/shortlink/internal/domain"
-	"github.com/aristodem96/shortlink/internal/observability"
+	"shortlink/internal/domain"
+	"shortlink/internal/observability"
 )
 
 // ClickWriter persists a batch of clicks.

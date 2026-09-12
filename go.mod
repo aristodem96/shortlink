@@ -1,4 +1,4 @@
-module github.com/aristodem96/shortlink
+module shortlink
 
 go 1.25.0
 

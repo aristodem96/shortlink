@@ -10,7 +10,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/aristodem96/shortlink/api"
+	"shortlink/api"
 )
 
 // apiRequestTimeout bounds a management API request. The redirect path is left

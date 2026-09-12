@@ -11,13 +11,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/aristodem96/shortlink/internal/billing"
-	"github.com/aristodem96/shortlink/internal/bot"
-	"github.com/aristodem96/shortlink/internal/cryptopay"
-	"github.com/aristodem96/shortlink/internal/domain"
-	"github.com/aristodem96/shortlink/internal/service"
-	"github.com/aristodem96/shortlink/internal/shortid"
-	"github.com/aristodem96/shortlink/internal/telegram"
+	"shortlink/internal/billing"
+	"shortlink/internal/bot"
+	"shortlink/internal/cryptopay"
+	"shortlink/internal/domain"
+	"shortlink/internal/service"
+	"shortlink/internal/shortid"
+	"shortlink/internal/telegram"
 )
 
 // This drives the bot the way a person does -- one chat message at a time --

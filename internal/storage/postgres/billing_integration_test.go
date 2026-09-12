@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/aristodem96/shortlink/internal/domain"
+	"shortlink/internal/domain"
 )
 
 // These run against the real PostgreSQL from TestMain. The properties they

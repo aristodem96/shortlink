@@ -12,7 +12,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/aristodem96/shortlink/internal/domain"
+	"shortlink/internal/domain"
 )
 
 // ErrCacheMiss is re-exported for readability at the call sites in this

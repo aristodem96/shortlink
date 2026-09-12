@@ -16,8 +16,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"github.com/aristodem96/shortlink/internal/domain"
-	"github.com/aristodem96/shortlink/internal/observability"
+	"shortlink/internal/domain"
+	"shortlink/internal/observability"
 )
 
 type ctxKey int

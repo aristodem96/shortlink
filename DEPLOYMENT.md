@@ -96,12 +96,33 @@ Port 443 serves HTTPS; port 80 is what Let's Encrypt uses to verify the domain.
 Nothing else needs to be reachable: the production overlay publishes no port for
 PostgreSQL, Redis, or the API itself.
 
-### 4. Clone the repository
+### 4. Put the source on the server
+
+The image is built on the server from source, so the whole checkout has to be
+there -- not just the compose files.
 
 ```bash
 sudo mkdir -p /opt/shortlink
 sudo chown $USER:$USER /opt/shortlink
-git clone https://github.com/aristodem96/shortlink.git /opt/shortlink
+```
+
+From a clone that is published somewhere:
+
+```bash
+git clone <your-repository-url> /opt/shortlink
+```
+
+Or copy a local working tree straight across. The trailing slash on the source
+matters: without it rsync creates `/opt/shortlink/shortlink/`.
+
+```bash
+rsync -av --exclude='.git' --exclude='.env' --exclude='coverage.out' \
+  ./ user@server:/opt/shortlink/
+```
+
+Then:
+
+```bash
 cd /opt/shortlink
 ```
 

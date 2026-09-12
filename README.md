@@ -614,7 +614,7 @@ api                   embedded OpenAPI spec
 ## Using this as a starting point
 
 ```bash
-make rename MODULE_NEW=github.com/you/shortlink
+make rename MODULE_NEW=github.com/you/shortlink   # or any module path you like
 ```
 
 ## License

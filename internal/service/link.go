@@ -9,8 +9,8 @@ import (
 
 	"golang.org/x/sync/singleflight"
 
-	"github.com/aristodem96/shortlink/internal/domain"
-	"github.com/aristodem96/shortlink/internal/observability"
+	"shortlink/internal/domain"
+	"shortlink/internal/observability"
 )
 
 const (

@@ -19,8 +19,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/aristodem96/shortlink/internal/cryptopay"
-	"github.com/aristodem96/shortlink/internal/domain"
+	"shortlink/internal/cryptopay"
+	"shortlink/internal/domain"
 )
 
 // --- doubles ------------------------------------------------------------------

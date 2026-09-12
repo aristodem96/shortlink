@@ -13,9 +13,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/aristodem96/shortlink/internal/domain"
-	"github.com/aristodem96/shortlink/internal/observability"
-	"github.com/aristodem96/shortlink/internal/service"
+	"shortlink/internal/domain"
+	"shortlink/internal/observability"
+	"shortlink/internal/service"
 )
 
 // LinkService is the subset of the service layer this transport needs.

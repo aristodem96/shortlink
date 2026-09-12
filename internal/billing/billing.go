@@ -12,9 +12,9 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/aristodem96/shortlink/internal/cryptopay"
-	"github.com/aristodem96/shortlink/internal/domain"
-	"github.com/aristodem96/shortlink/internal/service"
+	"shortlink/internal/cryptopay"
+	"shortlink/internal/domain"
+	"shortlink/internal/service"
 )
 
 // Store is the durable side of billing. Every method that changes more than

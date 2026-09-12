@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/aristodem96/shortlink/internal/domain"
+	"shortlink/internal/domain"
 )
 
 // fixedNow is the instant every test runs at, so expiry is deterministic.

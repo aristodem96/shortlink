@@ -15,8 +15,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/aristodem96/shortlink/internal/domain"
-	"github.com/aristodem96/shortlink/internal/service"
+	"shortlink/internal/domain"
+	"shortlink/internal/service"
 )
 
 const testKeySecret = "sl_test-key"
