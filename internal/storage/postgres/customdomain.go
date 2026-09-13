@@ -147,6 +147,22 @@ func (r *BillingRepository) SetActiveDomain(ctx context.Context, telegramUserID 
 	return d, nil
 }
 
+// ClearActiveDomain puts new links back on the operator's domain without
+// touching the user's registered domains.
+//
+// It is the counterpart to SetActiveDomain, and the only non-destructive way
+// back: deleting a domain would also unstamp every link already created on it.
+// Clearing is idempotent, so a user who has no subscription row yet, or who is
+// already on the default, gets the same answer as one who really changed.
+func (r *BillingRepository) ClearActiveDomain(ctx context.Context, telegramUserID int64) error {
+	if _, err := r.pool.Exec(ctx,
+		`UPDATE subscriptions SET active_domain_id = NULL WHERE telegram_user_id = $1`,
+		telegramUserID); err != nil {
+		return fmt.Errorf("postgres: clear active domain: %w", err)
+	}
+	return nil
+}
+
 // ActiveDomain returns the domain new links are stamped with, or
 // domain.ErrNotFound when the user has none.
 func (r *BillingRepository) ActiveDomain(ctx context.Context, telegramUserID int64) (*domain.CustomDomain, error) {

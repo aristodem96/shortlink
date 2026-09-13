@@ -81,6 +81,7 @@ Send any URL — I'll shorten it
 /adddomain <i>links.example.com</i> — register a domain you own
 /domains — your domains
 /usedomain <i>links.example.com</i> — choose the domain new links use
+/usedomain <i>default</i> — go back to the standard domain
 /deldomain <i>links.example.com</i> — remove a domain
 
 Paying again adds days on top of the time you have left and extends all of your keys.`
@@ -204,7 +205,20 @@ const msgAddDomainUsage = `Send the domain you want to use, for example:
 
 It must already have an <code>A</code> record pointing at this server.`
 
-const msgUseDomainUsage = "Which domain? For example: <code>/usedomain links.example.com</code>"
+// defaultDomainKeyword is what a user types instead of a hostname to send new
+// links back to the operator's domain. It cannot be mistaken for a real one:
+// domain.NormalizeHostname requires at least one dot.
+const defaultDomainKeyword = "default"
+
+const msgUseDomainUsage = `Which domain? For example:
+<code>/usedomain links.example.com</code>
+
+Or <code>/usedomain default</code> to go back to the standard domain. Your own domains stay registered either way.`
+
+// tplDefaultDomainInUse: the service's own base URL.
+const tplDefaultDomainInUse = `New links will use the standard domain again — <code>%s</code>.
+
+Your own domains are still registered; /usedomain switches back to one at any time. Links already created keep the domain they were made on.`
 
 const msgDelDomainUsage = "Which domain? For example: <code>/deldomain links.example.com</code>"
 
@@ -242,7 +256,7 @@ const tplDomainLine = "\n<code>%s</code>%s"
 
 const domainActiveMarker = " ← used for new links"
 
-const tplDomainsFooter = "\n\nChange with <code>/usedomain domain</code>"
+const tplDomainsFooter = "\n\nChange with <code>/usedomain domain</code>, or <code>/usedomain default</code> for the standard one"
 
 const msgDomainUnknown = "You have no such domain. /domains lists yours."
 

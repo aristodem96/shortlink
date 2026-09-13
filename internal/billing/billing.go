@@ -57,6 +57,9 @@ type Store interface {
 	Domains(ctx context.Context, telegramUserID int64) ([]domain.CustomDomain, error)
 	RemoveDomain(ctx context.Context, telegramUserID int64, hostname string) error
 	SetActiveDomain(ctx context.Context, telegramUserID int64, hostname string) (*domain.CustomDomain, error)
+	// ClearActiveDomain puts new links back on the operator's domain, leaving
+	// the user's registered domains alone.
+	ClearActiveDomain(ctx context.Context, telegramUserID int64) error
 	// ActiveDomain returns the domain new links are stamped with, or
 	// domain.ErrNotFound when the user has none.
 	ActiveDomain(ctx context.Context, telegramUserID int64) (*domain.CustomDomain, error)
@@ -451,6 +454,14 @@ func (s *Service) UseDomain(ctx context.Context, telegramUserID int64, raw strin
 		return nil, err
 	}
 	return s.store.SetActiveDomain(ctx, telegramUserID, hostname)
+}
+
+// UseDefaultDomain sends new links back to the operator's domain. The user's
+// own domains stay registered and their slots stay spent, so this is reversible
+// with UseDomain -- unlike removing a domain, which also unstamps every link
+// already created on it.
+func (s *Service) UseDefaultDomain(ctx context.Context, telegramUserID int64) error {
+	return s.store.ClearActiveDomain(ctx, telegramUserID)
 }
 
 // ActiveDomain returns the domain new links are stamped with, or

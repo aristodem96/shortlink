@@ -649,3 +649,58 @@ func TestBilling_RemovingADomainKeepsItsLinks(t *testing.T) {
 	assert.Empty(t, stored.Host, "they fall back to the operator's domain")
 	assert.Nil(t, stored.DomainID)
 }
+
+// TestBilling_GoingBackToTheDefaultDomainKeepsEverything is the non-destructive
+// counterpart to removing a domain: the registration, the slot and the links
+// already stamped with it all survive.
+func TestBilling_GoingBackToTheDefaultDomainKeepsEverything(t *testing.T) {
+	repo := setupBilling(t)
+	ctx := context.Background()
+
+	_, err := repo.ConfirmPayment(ctx, domainPayment(t, repo, 42))
+	require.NoError(t, err)
+	_, _, err = confirmPayment(ctx, repo, pendingPayment(t, repo, 42, 5))
+	require.NoError(t, err)
+	key, _, err := repo.IssueKey(ctx, 42, "ci", []byte("hash-default"), 5)
+	require.NoError(t, err)
+
+	d, err := repo.AddDomain(ctx, 42, "links.example.com")
+	require.NoError(t, err)
+
+	linkRepo := NewLinkRepository(testPool)
+	onCustom := &domain.Link{
+		Code: "branded", TargetURL: "https://example.com", OwnerID: key.ID,
+		DomainID: &d.ID, CreatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, linkRepo.Create(ctx, onCustom))
+
+	require.NoError(t, repo.ClearActiveDomain(ctx, 42))
+
+	_, err = repo.ActiveDomain(ctx, 42)
+	assert.ErrorIs(t, err, domain.ErrNotFound, "new links now go to the operator's domain")
+
+	// Nothing else moved.
+	stored, err := linkRepo.GetByCode(ctx, "branded")
+	require.NoError(t, err)
+	assert.Equal(t, "links.example.com", stored.Host, "a link already shared keeps its hostname")
+
+	domains, err := repo.Domains(ctx, 42)
+	require.NoError(t, err)
+	assert.Len(t, domains, 1, "the domain stays registered")
+
+	sub, err := repo.Subscription(ctx, 42)
+	require.NoError(t, err)
+	assert.Equal(t, 1, sub.DomainSlots, "the slot is not refunded, and not spent twice")
+
+	// And it is reversible.
+	back, err := repo.SetActiveDomain(ctx, 42, "links.example.com")
+	require.NoError(t, err)
+	active, err := repo.ActiveDomain(ctx, 42)
+	require.NoError(t, err)
+	assert.Equal(t, back.ID, active.ID)
+
+	// Clearing twice, or with no subscription at all, is not an error.
+	require.NoError(t, repo.ClearActiveDomain(ctx, 42))
+	require.NoError(t, repo.ClearActiveDomain(ctx, 42))
+	require.NoError(t, repo.ClearActiveDomain(ctx, 999_999))
+}

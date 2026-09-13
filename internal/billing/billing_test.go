@@ -136,6 +136,13 @@ func (s *fakeStore) SetActiveDomain(_ context.Context, _ int64, hostname string)
 	return nil, domain.ErrNotFound
 }
 
+func (s *fakeStore) ClearActiveDomain(_ context.Context, _ int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activeDomain = nil
+	return nil
+}
+
 func (s *fakeStore) ActiveDomain(_ context.Context, _ int64) (*domain.CustomDomain, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

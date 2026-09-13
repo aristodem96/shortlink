@@ -44,6 +44,7 @@ type Billing interface {
 	Domains(ctx context.Context, telegramUserID int64) ([]domain.CustomDomain, error)
 	RemoveDomain(ctx context.Context, telegramUserID int64, hostname string) error
 	UseDomain(ctx context.Context, telegramUserID int64, hostname string) (*domain.CustomDomain, error)
+	UseDefaultDomain(ctx context.Context, telegramUserID int64) error
 	ActiveDomain(ctx context.Context, telegramUserID int64) (*domain.CustomDomain, error)
 }
 
@@ -312,6 +313,17 @@ func (b *Bot) useDomain(ctx context.Context, user int64, args string) {
 	host := strings.TrimSpace(args)
 	if host == "" {
 		b.reply(ctx, user, msgUseDomainUsage)
+		return
+	}
+
+	// "default" can never collide with a real hostname: NormalizeHostname
+	// requires at least one dot, so no registered domain can be named this.
+	if strings.EqualFold(host, defaultDomainKeyword) {
+		if err := b.billing.UseDefaultDomain(ctx, user); err != nil {
+			b.fail(ctx, user, "use default domain", err)
+			return
+		}
+		b.reply(ctx, user, fmt.Sprintf(tplDefaultDomainInUse, html.EscapeString(b.apiBaseURL)))
 		return
 	}
 

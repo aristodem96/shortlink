@@ -430,6 +430,9 @@ Three smaller decisions hold the rest of it together:
 - **A link is stamped with its domain when it is created**, not rendered from
   the owner's current one. A link already shared keeps the hostname it was
   shared with, even after the owner adds a second domain or removes the first.
+  Switching domains is therefore cheap and reversible — `/usedomain` picks one
+  of theirs, `/usedomain default` goes back to the operator's — and none of it
+  touches a link that already exists.
 - **A custom-domain link is served only on its own host**, and answers 404 —
   not 403 — anywhere else. Otherwise a customer's branded link would also
   resolve on every other hostname this server terminates TLS for, and the

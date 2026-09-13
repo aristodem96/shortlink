@@ -75,6 +75,7 @@ type fakeBilling struct {
 	addedHost     string
 	removedHost   string
 	useDomainErr  error
+	clearedDomain bool
 }
 
 func (f *fakeBilling) Terms() billing.Config {
@@ -108,6 +109,12 @@ func (f *fakeBilling) UseDomain(_ context.Context, _ int64, hostname string) (*d
 		return nil, f.useDomainErr
 	}
 	return &domain.CustomDomain{ID: 2, Hostname: hostname}, nil
+}
+
+func (f *fakeBilling) UseDefaultDomain(context.Context, int64) error {
+	f.activeDomain = nil
+	f.clearedDomain = true
+	return f.useDomainErr
 }
 
 func (f *fakeBilling) ActiveDomain(context.Context, int64) (*domain.CustomDomain, error) {
@@ -675,4 +682,55 @@ func TestNotifier_TellsTheBuyerWhenAccessEnds(t *testing.T) {
 	msg := m.last(t)
 	assert.Equal(t, int64(42), msg.chatID, "in a private chat the user id is the chat id")
 	assert.True(t, strings.Contains(msg.text, "17 Sep 2026, 12:00 UTC"))
+}
+
+func TestUseDomain_SwitchesBetweenACustomDomainAndTheDefault(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a hostname selects that domain", func(t *testing.T) {
+		t.Parallel()
+		fb := &fakeBilling{}
+		b, m := newBot(t, fb, nil)
+
+		b.Handle(context.Background(), private("/usedomain links.example.com"))
+
+		assert.False(t, fb.clearedDomain)
+		assert.Contains(t, m.last(t).text, "links.example.com")
+	})
+
+	// Without this, the only way off a custom domain was /deldomain, which also
+	// unstamps every link already created on it.
+	t.Run("the default keyword clears it without removing anything", func(t *testing.T) {
+		t.Parallel()
+		fb := &fakeBilling{activeDomain: &domain.CustomDomain{ID: 1, Hostname: "links.example.com"}}
+		b, m := newBot(t, fb, nil)
+
+		b.Handle(context.Background(), private("/usedomain default"))
+
+		require.True(t, fb.clearedDomain, "new links must go back to the service's own domain")
+		msg := m.last(t).text
+		assert.Contains(t, msg, "https://sho.rt", "the user is told which domain that now is")
+		assert.Contains(t, msg, "still registered",
+			"switching back must not read as losing the domains they paid for")
+	})
+
+	t.Run("the keyword is case-insensitive", func(t *testing.T) {
+		t.Parallel()
+		fb := &fakeBilling{}
+		b, _ := newBot(t, fb, nil)
+
+		b.Handle(context.Background(), private("/usedomain DEFAULT"))
+		assert.True(t, fb.clearedDomain)
+	})
+
+	t.Run("no argument explains both forms", func(t *testing.T) {
+		t.Parallel()
+		fb := &fakeBilling{}
+		b, m := newBot(t, fb, nil)
+
+		b.Handle(context.Background(), private("/usedomain"))
+
+		assert.False(t, fb.clearedDomain)
+		assert.Contains(t, m.last(t).text, "default")
+	})
 }
