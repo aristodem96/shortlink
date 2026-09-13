@@ -54,6 +54,31 @@ services:
       IP_HASH_SALT: ${IP_HASH_SALT:-local-dev-salt}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_FORMAT: ${LOG_FORMAT:-json}
+
+      # Compose passes nothing into a container unless it is named here, so
+      # without these lines every tuning knob in .env.example would be silently
+      # ignored under `docker compose up` while still working under `make run`.
+      # CODE_LENGTH is the one that matters most: the bot already reads it, and
+      # if the API did not, the two would mint short codes of different lengths.
+      # Each falls back to the value the service uses by default, so an
+      # untouched .env changes nothing.
+      CODE_LENGTH: ${CODE_LENGTH:-7}
+      # False unless you really do put a proxy in front of this stack, as the
+      # "Running behind an existing nginx" section of DEPLOYMENT.md describes.
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
+      RATE_LIMIT_RPS: ${RATE_LIMIT_RPS:-20}
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-40}
+      CACHE_TTL: ${CACHE_TTL:-1h}
+      CACHE_NEGATIVE_TTL: ${CACHE_NEGATIVE_TTL:-30s}
+      POSTGRES_MAX_CONNS: ${POSTGRES_MAX_CONNS:-10}
+      CLICKS_BUFFER_SIZE: ${CLICKS_BUFFER_SIZE:-10000}
+      CLICKS_WORKERS: ${CLICKS_WORKERS:-2}
+      CLICKS_BATCH_SIZE: ${CLICKS_BATCH_SIZE:-500}
+      CLICKS_FLUSH_INTERVAL: ${CLICKS_FLUSH_INTERVAL:-2s}
+      HTTP_READ_TIMEOUT: ${HTTP_READ_TIMEOUT:-5s}
+      HTTP_WRITE_TIMEOUT: ${HTTP_WRITE_TIMEOUT:-10s}
+      HTTP_IDLE_TIMEOUT: ${HTTP_IDLE_TIMEOUT:-60s}
+      HTTP_SHUTDOWN_TIMEOUT: ${HTTP_SHUTDOWN_TIMEOUT:-15s}
     ports:
       # Override with API_PORT when 8080 is taken on the host.
       - "${API_PORT:-8080}:8080"
