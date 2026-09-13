@@ -394,6 +394,53 @@ again extends all of them at once. The bot is a separate process (`cmd/bot`)
 that owns billing; the API only learned one new thing — a key can carry an
 expiry.
 
+### Custom domains
+
+For a one-off $5 a buyer can serve their links from a domain of their own:
+
+```
+/buydomain                   → invoice → paid → "1 custom domain slot"
+/adddomain links.acme.com    → A record checked → registered and active
+https://go.dev/blog/context  → 🔗 https://links.acme.com/gen1234
+```
+
+The interesting part is the certificate, and it is Caddy's
+[on-demand TLS](Caddyfile) that makes it a non-event: the first time anybody
+opens a link on `links.acme.com`, Caddy obtains a certificate during the
+handshake. There is no provisioning step, and nothing to run when a customer
+signs up.
+
+That mechanism is also the feature's sharpest edge, which is why the `ask`
+endpoint in front of it is mandatory rather than optional. Without it, pointing
+any DNS record at this server would make it request a certificate for a name a
+stranger chose, and Let's Encrypt's per-account order limit would then be
+exhausted by that stranger — taking HTTPS down for the operator's own domains
+too. `GET /internal/tls-check` answers 200 only for a hostname that is
+registered, verified, and owned by somebody whose access has not lapsed, and it
+fails closed on a database outage, a malformed name, and a missing parameter
+alike. The proxy blocks `/internal` from the outside, because answering it
+publicly would reveal which customers exist.
+
+Three smaller decisions hold the rest of it together:
+
+- **Short codes stay globally unique.** Resolution is still `code → link`, so
+  the redirect hot path, the Redis key and the singleflight key are unchanged.
+  The cost is that two customers cannot both claim the alias `/promo`; random
+  seven-character codes make that a problem only for custom aliases.
+- **A link is stamped with its domain when it is created**, not rendered from
+  the owner's current one. A link already shared keeps the hostname it was
+  shared with, even after the owner adds a second domain or removes the first.
+- **A custom-domain link is served only on its own host**, and answers 404 —
+  not 403 — anywhere else. Otherwise a customer's branded link would also
+  resolve on every other hostname this server terminates TLS for, and the
+  distinction between 403 and 404 is what stops one customer's domain being
+  used to enumerate another's codes.
+
+Removing a domain does not delete the links that used it: `links.domain_id` is
+`ON DELETE SET NULL`, so they fall back to the operator's domain rather than
+breaking. The slot stays spent, so removing and re-adding is not a way to
+accumulate domains without paying.
+
 ### Shortening from the chat goes through the same service
 
 The bot does not call its own HTTP API; it uses `service.LinkService` in
@@ -438,7 +485,7 @@ Revoking the key the bot is using hands it the user's next newest key in the
 same transaction, so it can never be left pointing at a key that no longer
 works.
 
-### Confirming a payment exactly once### Confirming a payment exactly once
+### Confirming a payment exactly once
 
 Payment providers redeliver webhooks they did not see acknowledged, and a
 webhook can also race the reconciler described below. Either way, one invoice can
@@ -525,7 +572,10 @@ the full list with defaults. Configuration is validated at startup and **all**
 problems are reported at once, so a misconfigured deployment does not fail one
 variable per restart.
 
-The only variable without a default is `IP_HASH_SALT`.
+The only variable without a default is `IP_HASH_SALT`. Two more matter on a
+public server: `SERVER_IP`, which is what a customer's domain must resolve to
+before it is accepted, and `CRYPTOPAY_NETWORK`, which the production overlay
+refuses to default either way.
 
 ---
 

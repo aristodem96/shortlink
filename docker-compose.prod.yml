@@ -120,6 +120,11 @@ services:
       INVOICE_TTL: ${INVOICE_TTL:-1h}
       RECONCILE_INTERVAL: ${RECONCILE_INTERVAL:-20s}
       BOT_TIMEZONE: ${BOT_TIMEZONE:-Europe/Kyiv}
+      CUSTOM_DOMAIN_PRICE_USD: ${CUSTOM_DOMAIN_PRICE_USD:-5}
+      # Required for custom domains: the bot refuses a hostname whose A record
+      # does not resolve here. Leave it unset and the check is skipped, which
+      # would let anyone register a domain pointing anywhere.
+      SERVER_IP: ${SERVER_IP:?set SERVER_IP to this server's public address in .env}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       LOG_FORMAT: json
     restart: unless-stopped
@@ -135,6 +140,9 @@ services:
       - "443:443"
     environment:
       SHORTLINK_DOMAIN: ${SHORTLINK_DOMAIN}
+      # Space-separated hostnames this server should keep answering on besides
+      # the main one, so links shared under a previous domain do not break.
+      EXTRA_DOMAINS: ${EXTRA_DOMAINS:-}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # Certificates live here. Losing this volume means re-issuing them, and

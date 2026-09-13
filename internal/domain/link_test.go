@@ -121,3 +121,50 @@ func TestLink_IsExpired(t *testing.T) {
 	assert.True(t, (&Link{ExpiresAt: &past}).IsExpired(now))
 	assert.True(t, (&Link{ExpiresAt: &now}).IsExpired(now), "expiry is inclusive")
 }
+
+func TestNormalizeHostname(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		"plain":                 {in: "example.com", want: "example.com"},
+		"subdomain":             {in: "links.example.com", want: "links.example.com"},
+		"upper case is lowered": {in: "Links.Example.COM", want: "links.example.com"},
+		"trailing dot dropped":  {in: "example.com.", want: "example.com"},
+		"surrounding space":     {in: "  example.com ", want: "example.com"},
+		"pasted URL":            {in: "https://links.example.com/path", want: "links.example.com"},
+		"port stripped":         {in: "example.com:8443", want: "example.com"},
+		"hyphens inside":        {in: "my-links.example.co.uk", want: "my-links.example.co.uk"},
+		"empty":                 {in: "   ", wantErr: true},
+		"no dot":                {in: "localdomain", wantErr: true},
+		"wildcard":              {in: "*.example.com", wantErr: true},
+		"ipv4 literal":          {in: "203.0.113.45", wantErr: true},
+		"ipv6 literal":          {in: "2001:db8::1", wantErr: true},
+		"localhost":             {in: "localhost", wantErr: true},
+		"dot local":             {in: "printer.local", wantErr: true},
+		"leading hyphen":        {in: "-bad.example.com", wantErr: true},
+		"trailing hyphen":       {in: "bad-.example.com", wantErr: true},
+		"underscore":            {in: "bad_label.example.com", wantErr: true},
+		"space inside":          {in: "bad label.example.com", wantErr: true},
+		"empty label":           {in: "example..com", wantErr: true},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got, err := NormalizeHostname(tt.in)
+			if tt.wantErr {
+				require.Error(t, err, "%q must be refused before it reaches a certificate authority", tt.in)
+				var ve *ValidationError
+				require.ErrorAs(t, err, &ve)
+				assert.Equal(t, "domain", ve.Field)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

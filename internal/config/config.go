@@ -202,11 +202,16 @@ type Bot struct {
 	CryptoPayURL string
 	Network      string
 
-	PriceUSD       string
+	PriceUSD string
+	// DomainPriceUSD is the one-off price of one custom domain slot.
+	DomainPriceUSD string
 	AccessDays     int
 	MaxKeys        int
 	AcceptedAssets []string
 	InvoiceTTL     time.Duration
+	// ServerIP are the addresses a customer's domain must resolve to before it
+	// is accepted. Empty disables the check, which is only safe in development.
+	ServerIP []string
 
 	// ReconcileInterval is how often pending invoices are checked with the
 	// provider, which covers lost webhooks and local development alike.
@@ -250,6 +255,8 @@ func LoadBot() (*Bot, error) {
 		// be able to take real money. Mainnet is always a deliberate choice.
 		Network:           strings.ToLower(envString("CRYPTOPAY_NETWORK", "testnet")),
 		PriceUSD:          envString("PRICE_USD", "10"),
+		DomainPriceUSD:    envString("CUSTOM_DOMAIN_PRICE_USD", "5"),
+		ServerIP:          splitPlainList(envString("SERVER_IP", "")),
 		AccessDays:        envInt("ACCESS_DAYS", 5, collect),
 		MaxKeys:           envInt("MAX_KEYS_PER_USER", 5, collect),
 		AcceptedAssets:    splitList(envString("CRYPTOPAY_ASSETS", "USDT,TON")),
@@ -281,6 +288,7 @@ func LoadBot() (*Bot, error) {
 	require(cfg.Redis.Addr != "", "REDIS_ADDR must be set")
 	require(cfg.CodeLength >= 4 && cfg.CodeLength <= 32, "CODE_LENGTH must be between 4 and 32")
 	require(isPositiveAmount(cfg.PriceUSD), "PRICE_USD must be a positive amount such as 10 or 9.99")
+	require(isPositiveAmount(cfg.DomainPriceUSD), "CUSTOM_DOMAIN_PRICE_USD must be a positive amount such as 5 or 4.99")
 	require(cfg.AccessDays > 0, "ACCESS_DAYS must be positive")
 	require(cfg.MaxKeys > 0, "MAX_KEYS_PER_USER must be positive")
 	require(len(cfg.AcceptedAssets) > 0, "CRYPTOPAY_ASSETS must list at least one asset")
@@ -291,6 +299,19 @@ func LoadBot() (*Bot, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+// splitPlainList is splitList without the upper-casing, for values whose case
+// is significant. IPv6 literals are compared verbatim against what the resolver
+// returns, which is lower case.
+func splitPlainList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func splitList(s string) []string {

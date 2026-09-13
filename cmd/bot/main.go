@@ -106,12 +106,17 @@ func run() error {
 	tg := telegram.NewWithBaseURL(cfg.TelegramAPIURL, cfg.TelegramToken)
 	pay := cryptopay.New(cfg.CryptoPayURL, cfg.CryptoPayToken)
 
+	// A nil resolver means the system one. It is named here so a test can drive
+	// domain verification without touching real DNS.
 	svc := billing.New(
 		postgres.NewBillingRepository(pool),
 		pay,
 		bot.NewNotifier(tg, loc),
+		nil,
+		cfg.ServerIP,
 		billing.Config{
 			PriceUSD:       cfg.PriceUSD,
+			DomainPriceUSD: cfg.DomainPriceUSD,
 			AccessDays:     cfg.AccessDays,
 			MaxKeys:        cfg.MaxKeys,
 			AcceptedAssets: cfg.AcceptedAssets,
@@ -146,6 +151,8 @@ func run() error {
 	log.Info("starting bot",
 		slog.String("network", cfg.Network),
 		slog.String("price_usd", cfg.PriceUSD),
+		slog.String("domain_price_usd", cfg.DomainPriceUSD),
+		slog.Int("server_ip_count", len(cfg.ServerIP)),
 		slog.Int("access_days", cfg.AccessDays),
 		slog.Int("max_keys", cfg.MaxKeys))
 

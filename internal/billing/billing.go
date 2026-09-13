@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,15 +22,18 @@ import (
 // Store is the durable side of billing. Every method that changes more than
 // one row does so in a single transaction.
 type Store interface {
-	// RecentPendingPayment returns the user's newest pending payment created
-	// after the given instant, or domain.ErrNotFound.
-	RecentPendingPayment(ctx context.Context, telegramUserID int64, after time.Time) (*domain.Payment, error)
+	// RecentPendingPayment returns the user's newest pending payment for one
+	// product, created after the given instant, or domain.ErrNotFound. The
+	// product is part of the lookup because the result is reused as the invoice
+	// the buyer is sent: unscoped, somebody who asked for access and then a
+	// domain would be handed the wrong invoice and charged the wrong amount.
+	RecentPendingPayment(ctx context.Context, telegramUserID int64, product domain.Product, after time.Time) (*domain.Payment, error)
 	CreatePayment(ctx context.Context, p domain.Payment) (*domain.Payment, error)
-	// ConfirmPayment marks a pending payment paid, extends the buyer's access
-	// and every live key they hold. confirmed is false when the payment was
-	// already confirmed or does not exist -- which is what makes it safe to
-	// call from a retried webhook and the reconciler at the same time.
-	ConfirmPayment(ctx context.Context, invoiceID int64) (sub *domain.Subscription, confirmed bool, err error)
+	// ConfirmPayment marks a pending payment paid and grants whatever it sold.
+	// Confirmation.Confirmed is false when the payment was already confirmed or
+	// does not exist -- which is what makes it safe to call from a retried
+	// webhook and the reconciler at the same time.
+	ConfirmPayment(ctx context.Context, invoiceID int64) (domain.Confirmation, error)
 	ExpirePayment(ctx context.Context, invoiceID int64) error
 	PendingPayments(ctx context.Context, createdAfter time.Time, limit int) ([]domain.Payment, error)
 	Subscription(ctx context.Context, telegramUserID int64) (*domain.Subscription, error)
@@ -45,6 +50,25 @@ type Store interface {
 	// keys, returning domain.ErrNotFound for anything else.
 	SetActiveKey(ctx context.Context, telegramUserID, keyID int64) (*domain.APIKey, error)
 	SetActiveKeyByHash(ctx context.Context, telegramUserID int64, hash []byte) (*domain.APIKey, error)
+
+	// AddDomain registers a verified hostname against one of the user's paid
+	// slots, returning domain.ErrNoDomainSlot or domain.ErrDomainTaken.
+	AddDomain(ctx context.Context, telegramUserID int64, hostname string) (*domain.CustomDomain, error)
+	Domains(ctx context.Context, telegramUserID int64) ([]domain.CustomDomain, error)
+	RemoveDomain(ctx context.Context, telegramUserID int64, hostname string) error
+	SetActiveDomain(ctx context.Context, telegramUserID int64, hostname string) (*domain.CustomDomain, error)
+	// ActiveDomain returns the domain new links are stamped with, or
+	// domain.ErrNotFound when the user has none.
+	ActiveDomain(ctx context.Context, telegramUserID int64) (*domain.CustomDomain, error)
+	// ServableDomain returns a hostname that may be served right now:
+	// registered, verified, and owned by somebody with live access.
+	ServableDomain(ctx context.Context, hostname string) (*domain.CustomDomain, error)
+}
+
+// Resolver looks up a hostname's addresses. It exists so domain verification
+// can be driven by a stub in tests instead of real DNS.
+type Resolver interface {
+	LookupHost(ctx context.Context, host string) ([]string, error)
 }
 
 // PaymentProvider issues and looks up invoices.
@@ -57,12 +81,18 @@ type PaymentProvider interface {
 // rather than a message string so billing stays free of user-facing copy.
 type Notifier interface {
 	PaymentConfirmed(ctx context.Context, telegramUserID int64, paidUntil time.Time) error
+	// DomainSlotGranted announces a custom-domain purchase. It is separate from
+	// PaymentConfirmed because a domain slot buys no days, so there is no new
+	// access window to report.
+	DomainSlotGranted(ctx context.Context, telegramUserID int64, slots int) error
 }
 
 // Config holds the commercial terms.
 type Config struct {
 	// PriceUSD is the price of one access period, e.g. "10".
 	PriceUSD string
+	// DomainPriceUSD is the one-off price of one custom domain slot.
+	DomainPriceUSD string
 	// AccessDays is how long one payment buys.
 	AccessDays int
 	// MaxKeys caps the live keys one user may hold, so a single purchase
@@ -76,17 +106,27 @@ type Config struct {
 
 // Service implements the billing use cases.
 type Service struct {
-	store  Store
-	pay    PaymentProvider
-	notify Notifier
-	cfg    Config
-	log    *slog.Logger
-	now    func() time.Time
+	store    Store
+	pay      PaymentProvider
+	notify   Notifier
+	resolve  Resolver
+	serverIP []string
+	cfg      Config
+	log      *slog.Logger
+	now      func() time.Time
 }
 
-// New wires a Service.
-func New(store Store, pay PaymentProvider, notify Notifier, cfg Config, log *slog.Logger) *Service {
-	return &Service{store: store, pay: pay, notify: notify, cfg: cfg, log: log, now: time.Now}
+// New wires a Service. serverIP is the set of addresses a customer's domain
+// must resolve to before it is accepted; an empty set disables the check, which
+// is only appropriate in development.
+func New(store Store, pay PaymentProvider, notify Notifier, resolve Resolver, serverIP []string, cfg Config, log *slog.Logger) *Service {
+	if resolve == nil {
+		resolve = net.DefaultResolver
+	}
+	return &Service{
+		store: store, pay: pay, notify: notify, resolve: resolve, serverIP: serverIP,
+		cfg: cfg, log: log, now: time.Now,
+	}
 }
 
 // Terms exposes the commercial terms for display.
@@ -98,12 +138,19 @@ func (s *Service) Terms() Config { return s.cfg }
 // rather than a new one each time. Otherwise every tap would open another
 // invoice at the provider, and a user who paid an older one would be confused
 // by the rest.
-func (s *Service) Checkout(ctx context.Context, telegramUserID int64) (string, error) {
+func (s *Service) Checkout(ctx context.Context, telegramUserID int64, product domain.Product) (string, error) {
+	price, description, accessDays, err := s.offer(product)
+	if err != nil {
+		return "", err
+	}
+
 	// Reuse only invoices with comfortable time left, so nobody is handed a
-	// link that expires while they are finding their wallet.
+	// link that expires while they are finding their wallet. The lookup is
+	// scoped to the product: reusing across products would charge the buyer
+	// the other product's price.
 	reuseAfter := s.now().Add(-s.cfg.InvoiceTTL / 2)
 
-	existing, err := s.store.RecentPendingPayment(ctx, telegramUserID, reuseAfter)
+	existing, err := s.store.RecentPendingPayment(ctx, telegramUserID, product, reuseAfter)
 	switch {
 	case err == nil:
 		return existing.PayURL, nil
@@ -112,10 +159,10 @@ func (s *Service) Checkout(ctx context.Context, telegramUserID int64) (string, e
 	}
 
 	inv, err := s.pay.CreateInvoice(ctx, cryptopay.InvoiceRequest{
-		Amount:         s.cfg.PriceUSD,
+		Amount:         price,
 		Fiat:           "USD",
 		AcceptedAssets: s.cfg.AcceptedAssets,
-		Description:    fmt.Sprintf("shortlink API access, %d days", s.cfg.AccessDays),
+		Description:    description,
 		Payload:        strconv.FormatInt(telegramUserID, 10),
 		ExpiresIn:      s.cfg.InvoiceTTL,
 	})
@@ -129,9 +176,10 @@ func (s *Service) Checkout(ctx context.Context, telegramUserID int64) (string, e
 	if _, err := s.store.CreatePayment(ctx, domain.Payment{
 		InvoiceID:      inv.InvoiceID,
 		TelegramUserID: telegramUserID,
-		Amount:         s.cfg.PriceUSD,
+		Product:        product,
+		Amount:         price,
 		Currency:       "USD",
-		AccessDays:     s.cfg.AccessDays,
+		AccessDays:     accessDays,
 		Status:         domain.PaymentPending,
 		PayURL:         inv.PayURL(),
 	}); err != nil {
@@ -141,30 +189,51 @@ func (s *Service) Checkout(ctx context.Context, telegramUserID int64) (string, e
 	return inv.PayURL(), nil
 }
 
+// offer turns a product into what the invoice should say and what the payment
+// row should record. accessDays is nil for anything that buys no time.
+func (s *Service) offer(product domain.Product) (price, description string, accessDays *int, err error) {
+	switch product {
+	case domain.ProductAccess:
+		days := s.cfg.AccessDays
+		return s.cfg.PriceUSD, fmt.Sprintf("shortlink API access, %d days", days), &days, nil
+	case domain.ProductDomain:
+		return s.cfg.DomainPriceUSD, "shortlink custom domain", nil, nil
+	default:
+		return "", "", nil, fmt.Errorf("unknown product %q", product)
+	}
+}
+
 // Confirm grants access for a paid invoice. It is idempotent, and it notifies
 // the buyer only on the call that actually made the change -- so a webhook
 // retried three times, racing the reconciler, still sends exactly one message.
 func (s *Service) Confirm(ctx context.Context, invoiceID int64) error {
-	sub, confirmed, err := s.store.ConfirmPayment(ctx, invoiceID)
+	c, err := s.store.ConfirmPayment(ctx, invoiceID)
 	if err != nil {
 		return fmt.Errorf("confirm invoice %d: %w", invoiceID, err)
 	}
-	if !confirmed {
+	if !c.Confirmed {
 		return nil
 	}
 
 	s.log.InfoContext(ctx, "payment confirmed",
 		slog.Int64("invoice_id", invoiceID),
-		slog.Int64("telegram_user_id", sub.TelegramUserID),
-		slog.Time("paid_until", sub.PaidUntil))
+		slog.Int64("telegram_user_id", c.TelegramUserID),
+		slog.String("product", string(c.Product)))
 
 	// The payment is recorded before this point. A failed notification is
 	// logged, never returned: the user has what they paid for, and /status
 	// shows it, whereas returning an error would make the webhook retry a
 	// payment that is already settled.
-	if err := s.notify.PaymentConfirmed(ctx, sub.TelegramUserID, sub.PaidUntil); err != nil {
+	var notifyErr error
+	switch c.Product {
+	case domain.ProductAccess:
+		notifyErr = s.notify.PaymentConfirmed(ctx, c.TelegramUserID, c.PaidUntil)
+	case domain.ProductDomain:
+		notifyErr = s.notify.DomainSlotGranted(ctx, c.TelegramUserID, c.DomainSlots)
+	}
+	if notifyErr != nil {
 		s.log.WarnContext(ctx, "could not notify buyer",
-			slog.Int64("telegram_user_id", sub.TelegramUserID), slog.Any("error", err))
+			slog.Int64("telegram_user_id", c.TelegramUserID), slog.Any("error", notifyErr))
 	}
 	return nil
 }
@@ -314,6 +383,99 @@ func (s *Service) Keys(ctx context.Context, telegramUserID int64) ([]domain.APIK
 // RevokeKey disables one of the user's keys.
 func (s *Service) RevokeKey(ctx context.Context, telegramUserID, keyID int64) error {
 	return s.store.RevokeKey(ctx, telegramUserID, keyID)
+}
+
+// AddDomain validates a customer-supplied hostname, checks that it really
+// points at this server, and registers it against one of their paid slots.
+//
+// The DNS check is the ownership proof. It is weaker than a TXT challenge --
+// anyone may point a domain they own at somebody else's IP -- but it is the
+// condition that has to hold anyway for the domain to serve, and pointing a
+// domain here gains an attacker nothing except a hostname that redirects to
+// links they cannot see or control.
+func (s *Service) AddDomain(ctx context.Context, telegramUserID int64, raw string) (*domain.CustomDomain, error) {
+	hostname, err := domain.NormalizeHostname(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.checkPointsHere(ctx, hostname); err != nil {
+		return nil, err
+	}
+	return s.store.AddDomain(ctx, telegramUserID, hostname)
+}
+
+// checkPointsHere resolves the hostname and requires at least one address to be
+// one of this server's. An empty serverIP set skips the check, which is how the
+// local development stack works without public DNS.
+func (s *Service) checkPointsHere(ctx context.Context, hostname string) error {
+	if len(s.serverIP) == 0 {
+		return nil
+	}
+
+	addrs, err := s.resolve.LookupHost(ctx, hostname)
+	if err != nil {
+		// A name that does not resolve yet is the ordinary case right after
+		// somebody adds the record, so this is not an internal error.
+		s.log.InfoContext(ctx, "custom domain does not resolve",
+			slog.String("hostname", hostname), slog.Any("error", err))
+		return domain.ErrDomainNotPointed
+	}
+	for _, a := range addrs {
+		if slices.Contains(s.serverIP, a) {
+			return nil
+		}
+	}
+	return domain.ErrDomainNotPointed
+}
+
+// Domains lists the user's registered domains.
+func (s *Service) Domains(ctx context.Context, telegramUserID int64) ([]domain.CustomDomain, error) {
+	return s.store.Domains(ctx, telegramUserID)
+}
+
+// RemoveDomain deletes one of the user's domains. Links stamped with it fall
+// back to the operator's domain instead of breaking.
+func (s *Service) RemoveDomain(ctx context.Context, telegramUserID int64, raw string) error {
+	hostname, err := domain.NormalizeHostname(raw)
+	if err != nil {
+		return err
+	}
+	return s.store.RemoveDomain(ctx, telegramUserID, hostname)
+}
+
+// UseDomain chooses which domain new links are stamped with.
+func (s *Service) UseDomain(ctx context.Context, telegramUserID int64, raw string) (*domain.CustomDomain, error) {
+	hostname, err := domain.NormalizeHostname(raw)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.SetActiveDomain(ctx, telegramUserID, hostname)
+}
+
+// ActiveDomain returns the domain new links are stamped with, or
+// domain.ErrNotFound when the user has none.
+func (s *Service) ActiveDomain(ctx context.Context, telegramUserID int64) (*domain.CustomDomain, error) {
+	return s.store.ActiveDomain(ctx, telegramUserID)
+}
+
+// MayServe reports whether a hostname may be served, and is what gates
+// certificate issuance. It answers false for anything it does not recognise.
+func (s *Service) MayServe(ctx context.Context, hostname string) (bool, error) {
+	hostname, err := domain.NormalizeHostname(hostname)
+	if err != nil {
+		return false, nil //nolint:nilerr // a malformed hostname is a refusal, not a failure
+	}
+
+	_, err = s.store.ServableDomain(ctx, hostname)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, domain.ErrNotFound):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 const maxKeyNameRunes = 40

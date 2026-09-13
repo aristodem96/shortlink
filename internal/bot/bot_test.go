@@ -67,13 +67,55 @@ type fakeBilling struct {
 	revokeErr error
 	revoked   int64
 	checkout  string
+
+	boughtProduct domain.Product
+	domains       []domain.CustomDomain
+	activeDomain  *domain.CustomDomain
+	addDomainErr  error
+	addedHost     string
+	removedHost   string
+	useDomainErr  error
 }
 
 func (f *fakeBilling) Terms() billing.Config {
-	return billing.Config{PriceUSD: "10", AccessDays: 5, MaxKeys: 5}
+	return billing.Config{PriceUSD: "10", DomainPriceUSD: "5", AccessDays: 5, MaxKeys: 5}
 }
 
-func (f *fakeBilling) Checkout(context.Context, int64) (string, error) { return f.checkout, nil }
+func (f *fakeBilling) Checkout(_ context.Context, _ int64, product domain.Product) (string, error) {
+	f.boughtProduct = product
+	return f.checkout, nil
+}
+
+func (f *fakeBilling) AddDomain(_ context.Context, _ int64, hostname string) (*domain.CustomDomain, error) {
+	f.addedHost = hostname
+	if f.addDomainErr != nil {
+		return nil, f.addDomainErr
+	}
+	return &domain.CustomDomain{ID: 1, Hostname: hostname, VerifiedAt: &liveUntil}, nil
+}
+
+func (f *fakeBilling) Domains(context.Context, int64) ([]domain.CustomDomain, error) {
+	return f.domains, nil
+}
+
+func (f *fakeBilling) RemoveDomain(_ context.Context, _ int64, hostname string) error {
+	f.removedHost = hostname
+	return f.useDomainErr
+}
+
+func (f *fakeBilling) UseDomain(_ context.Context, _ int64, hostname string) (*domain.CustomDomain, error) {
+	if f.useDomainErr != nil {
+		return nil, f.useDomainErr
+	}
+	return &domain.CustomDomain{ID: 2, Hostname: hostname}, nil
+}
+
+func (f *fakeBilling) ActiveDomain(context.Context, int64) (*domain.CustomDomain, error) {
+	if f.activeDomain == nil {
+		return nil, domain.ErrNotFound
+	}
+	return f.activeDomain, nil
+}
 
 func (f *fakeBilling) Status(context.Context, int64) (*domain.Subscription, error) {
 	return f.sub, f.subErr

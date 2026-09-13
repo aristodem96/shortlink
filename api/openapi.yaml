@@ -310,6 +310,12 @@ components:
             The full short link. Its origin is the service's configured
             BASE_URL, so it is `http://localhost:8080/...` in a default local
             setup and `https://your.domain/...` once deployed.
+
+            If the key's owner has registered a custom domain, the link is
+            created on that domain and this is the only origin it will answer
+            on: requesting the same code on any other host returns 404. The
+            origin is fixed when the link is created and does not change if the
+            owner later switches domains.
           example: "https://sho.rt/go-context"
         target_url: { type: string, format: uri, example: "https://go.dev/blog/context" }
         expires_at: { type: string, format: date-time, nullable: true }

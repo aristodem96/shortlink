@@ -32,7 +32,7 @@ type UpdateSource interface {
 // Billing is what the bot needs from the billing service.
 type Billing interface {
 	Terms() billing.Config
-	Checkout(ctx context.Context, telegramUserID int64) (string, error)
+	Checkout(ctx context.Context, telegramUserID int64, product domain.Product) (string, error)
 	Status(ctx context.Context, telegramUserID int64) (*domain.Subscription, error)
 	IssueKey(ctx context.Context, telegramUserID int64, name string) (*billing.IssuedKey, error)
 	Keys(ctx context.Context, telegramUserID int64) ([]domain.APIKey, error)
@@ -40,6 +40,11 @@ type Billing interface {
 	ActiveKey(ctx context.Context, telegramUserID int64) (*domain.APIKey, error)
 	UsableKey(ctx context.Context, telegramUserID int64) (*domain.APIKey, error)
 	UseKey(ctx context.Context, telegramUserID int64, ref string) (*domain.APIKey, error)
+	AddDomain(ctx context.Context, telegramUserID int64, hostname string) (*domain.CustomDomain, error)
+	Domains(ctx context.Context, telegramUserID int64) ([]domain.CustomDomain, error)
+	RemoveDomain(ctx context.Context, telegramUserID int64, hostname string) error
+	UseDomain(ctx context.Context, telegramUserID int64, hostname string) (*domain.CustomDomain, error)
+	ActiveDomain(ctx context.Context, telegramUserID int64) (*domain.CustomDomain, error)
 }
 
 // Links is what the bot needs from the link service. It is the same
@@ -63,6 +68,9 @@ var Commands = []telegram.Command{
 	{Command: "usekey", Description: "Choose the key the bot uses for links"},
 	{Command: "status", Description: "How much access is left"},
 	{Command: "revoke", Description: "Revoke a key"},
+	{Command: "buydomain", Description: "Pay for a custom domain"},
+	{Command: "domains", Description: "Your custom domains"},
+	{Command: "adddomain", Description: "Register a domain you own"},
 	{Command: "help", Description: "All commands"},
 }
 
@@ -204,19 +212,146 @@ func (b *Bot) Handle(ctx context.Context, u telegram.Update) {
 		b.listLinks(ctx, user)
 	case "/stats":
 		b.stats(ctx, user, args)
+	case "/buydomain":
+		b.buyDomain(ctx, user)
+	case "/domains":
+		b.domains(ctx, user)
+	case "/adddomain":
+		b.addDomain(ctx, user, args)
+	case "/usedomain":
+		b.useDomain(ctx, user, args)
+	case "/deldomain":
+		b.delDomain(ctx, user, args)
 	default:
 		b.reply(ctx, user, msgUnknownCommand)
 	}
 }
 
 func (b *Bot) buy(ctx context.Context, user int64) {
-	url, err := b.billing.Checkout(ctx, user)
+	url, err := b.billing.Checkout(ctx, user, domain.ProductAccess)
 	if err != nil {
 		b.fail(ctx, user, "checkout", err)
 		return
 	}
 	t := b.billing.Terms()
 	b.reply(ctx, user, fmt.Sprintf(tplCheckout, t.PriceUSD, t.AccessDays), telegram.Button{Text: msgPayButton, URL: url})
+}
+
+func (b *Bot) buyDomain(ctx context.Context, user int64) {
+	url, err := b.billing.Checkout(ctx, user, domain.ProductDomain)
+	if err != nil {
+		b.fail(ctx, user, "checkout domain", err)
+		return
+	}
+	t := b.billing.Terms()
+	b.reply(ctx, user, fmt.Sprintf(tplBuyDomain, t.DomainPriceUSD),
+		telegram.Button{Text: msgPayButton, URL: url})
+}
+
+func (b *Bot) addDomain(ctx context.Context, user int64, args string) {
+	host := strings.TrimSpace(args)
+	if host == "" {
+		b.reply(ctx, user, msgAddDomainUsage)
+		return
+	}
+
+	d, err := b.billing.AddDomain(ctx, user, host)
+	var validation *domain.ValidationError
+	switch {
+	case errors.Is(err, domain.ErrNoDomainSlot):
+		b.reply(ctx, user, fmt.Sprintf(tplNoDomainSlot, b.billing.Terms().DomainPriceUSD))
+		return
+	case errors.Is(err, domain.ErrDomainTaken):
+		b.reply(ctx, user, msgDomainTaken)
+		return
+	case errors.Is(err, domain.ErrDomainNotPointed):
+		b.reply(ctx, user, fmt.Sprintf(tplDomainNotPointed, html.EscapeString(host)))
+		return
+	case errors.As(err, &validation):
+		b.reply(ctx, user, fmt.Sprintf(tplBadDomain, html.EscapeString(validation.Reason)))
+		return
+	case err != nil:
+		b.fail(ctx, user, "add domain", err)
+		return
+	}
+	b.reply(ctx, user, fmt.Sprintf(tplDomainAdded, html.EscapeString(d.Hostname)))
+}
+
+func (b *Bot) domains(ctx context.Context, user int64) {
+	list, err := b.billing.Domains(ctx, user)
+	if err != nil {
+		b.fail(ctx, user, "list domains", err)
+		return
+	}
+	if len(list) == 0 {
+		b.reply(ctx, user, fmt.Sprintf(tplNoDomains, b.billing.Terms().DomainPriceUSD))
+		return
+	}
+
+	// A missing active domain is not an error worth showing: the list is still
+	// useful, it just has nothing marked.
+	var activeID int64
+	if active, err := b.billing.ActiveDomain(ctx, user); err == nil {
+		activeID = active.ID
+	}
+
+	var sb strings.Builder
+	sb.WriteString(tplDomainsHeader)
+	for _, d := range list {
+		marker := ""
+		if d.ID == activeID {
+			marker = domainActiveMarker
+		}
+		fmt.Fprintf(&sb, tplDomainLine, html.EscapeString(d.Hostname), marker)
+	}
+	sb.WriteString(tplDomainsFooter)
+	b.reply(ctx, user, sb.String())
+}
+
+func (b *Bot) useDomain(ctx context.Context, user int64, args string) {
+	host := strings.TrimSpace(args)
+	if host == "" {
+		b.reply(ctx, user, msgUseDomainUsage)
+		return
+	}
+
+	d, err := b.billing.UseDomain(ctx, user, host)
+	var validation *domain.ValidationError
+	switch {
+	case errors.Is(err, domain.ErrNotFound):
+		b.reply(ctx, user, msgDomainUnknown)
+		return
+	case errors.As(err, &validation):
+		b.reply(ctx, user, fmt.Sprintf(tplBadDomain, html.EscapeString(validation.Reason)))
+		return
+	case err != nil:
+		b.fail(ctx, user, "use domain", err)
+		return
+	}
+	b.reply(ctx, user, fmt.Sprintf(tplDomainInUse, html.EscapeString(d.Hostname)))
+}
+
+func (b *Bot) delDomain(ctx context.Context, user int64, args string) {
+	host := strings.TrimSpace(args)
+	if host == "" {
+		b.reply(ctx, user, msgDelDomainUsage)
+		return
+	}
+
+	err := b.billing.RemoveDomain(ctx, user, host)
+	var validation *domain.ValidationError
+	switch {
+	case errors.Is(err, domain.ErrNotFound):
+		b.reply(ctx, user, msgDomainUnknown)
+		return
+	case errors.As(err, &validation):
+		b.reply(ctx, user, fmt.Sprintf(tplBadDomain, html.EscapeString(validation.Reason)))
+		return
+	case err != nil:
+		b.fail(ctx, user, "remove domain", err)
+		return
+	}
+	b.reply(ctx, user, fmt.Sprintf(tplDomainRemoved, html.EscapeString(host)))
 }
 
 func (b *Bot) status(ctx context.Context, user int64) {
@@ -390,8 +525,23 @@ func (b *Bot) shorten(ctx context.Context, user int64, args string) {
 		return
 	}
 
+	// A failure to look up the active domain is not worth refusing the link
+	// over: falling back to the default host still produces a working link.
+	var (
+		domainID   *int64
+		domainHost string
+	)
+	if active, err := b.billing.ActiveDomain(ctx, user); err == nil {
+		domainID, domainHost = &active.ID, active.Hostname
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		b.log.WarnContext(ctx, "could not read the active domain",
+			slog.Int64("telegram_user_id", user), slog.Any("error", err))
+	}
+
 	link, err := b.links.Create(ctx, service.CreateLinkInput{
 		OwnerID:   key.ID,
+		DomainID:  domainID,
+		Host:      domainHost,
 		TargetURL: target,
 		Alias:     strings.TrimSpace(alias),
 	})
@@ -409,7 +559,7 @@ func (b *Bot) shorten(ctx context.Context, user int64, args string) {
 		return
 	}
 
-	short := b.shortURL(link.Code)
+	short := b.shortURL(link)
 	b.reply(ctx, user,
 		fmt.Sprintf(tplShortened, html.EscapeString(short), html.EscapeString(link.TargetURL)),
 		telegram.Button{Text: msgOpenButton, URL: short})
@@ -506,11 +656,19 @@ func (b *Bot) stats(ctx context.Context, user int64, args string) {
 		}
 	}
 
-	b.reply(ctx, user, sb.String(), telegram.Button{Text: msgOpenButton, URL: b.shortURL(st.Code)})
+	b.reply(ctx, user, sb.String(),
+		telegram.Button{Text: msgOpenButton, URL: b.shortURL(&domain.Link{Code: st.Code, Host: st.Host})})
 }
 
-func (b *Bot) shortURL(code string) string {
-	return b.apiBaseURL + "/" + code
+// shortURL renders a link's public address. A link stamped with a custom domain
+// is always shown on that domain, even after the owner switches to another one:
+// the hostname was fixed when the link was created, and anything already shared
+// still points there.
+func (b *Bot) shortURL(l *domain.Link) string {
+	if l.Host != "" {
+		return "https://" + l.Host + "/" + l.Code
+	}
+	return b.apiBaseURL + "/" + l.Code
 }
 
 // fail logs the real cause and shows the user a generic message: internal
@@ -599,4 +757,10 @@ func NewNotifier(msg Messenger, loc *time.Location) *Notifier {
 // is the user id, so the buyer can be messaged without any stored chat state.
 func (n *Notifier) PaymentConfirmed(ctx context.Context, telegramUserID int64, paidUntil time.Time) error {
 	return n.msg.SendMessage(ctx, telegramUserID, fmt.Sprintf(tplPaid, paidUntil.In(n.loc).Format(dateLayout)))
+}
+
+// DomainSlotGranted tells the buyer a custom domain slot is theirs, and what to
+// do next: the slot is useless until they point DNS at this server.
+func (n *Notifier) DomainSlotGranted(ctx context.Context, telegramUserID int64, slots int) error {
+	return n.msg.SendMessage(ctx, telegramUserID, fmt.Sprintf(tplDomainSlotGranted, slots))
 }

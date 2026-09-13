@@ -26,32 +26,40 @@ func NewBillingRepository(pool *pgxpool.Pool) *BillingRepository {
 
 // amount is read as text: NUMERIC has no exact Go counterpart, and a float
 // would turn 10.00 into 9.999999.
-const paymentColumns = `id, invoice_id, telegram_user_id, amount::text, currency,
+const paymentColumns = `id, invoice_id, telegram_user_id, product, amount::text, currency,
 	access_days, status, pay_url, created_at, paid_at`
 
 func scanPayment(row pgx.Row) (*domain.Payment, error) {
 	var (
-		p      domain.Payment
-		status string
+		p       domain.Payment
+		product string
+		status  string
 	)
-	err := row.Scan(&p.ID, &p.InvoiceID, &p.TelegramUserID, &p.Amount, &p.Currency,
+	err := row.Scan(&p.ID, &p.InvoiceID, &p.TelegramUserID, &product, &p.Amount, &p.Currency,
 		&p.AccessDays, &status, &p.PayURL, &p.CreatedAt, &p.PaidAt)
 	if err != nil {
 		return nil, err
 	}
+	p.Product = domain.Product(product)
 	p.Status = domain.PaymentStatus(status)
 	return &p, nil
 }
 
-// RecentPendingPayment returns the user's newest pending payment created after
-// the given instant.
-func (r *BillingRepository) RecentPendingPayment(ctx context.Context, telegramUserID int64, after time.Time) (*domain.Payment, error) {
+// RecentPendingPayment returns the user's newest pending payment for one
+// product, created after the given instant.
+//
+// Scoping by product is not a refinement, it is a correctness requirement. The
+// caller reuses whatever this returns as the invoice to send the buyer, so an
+// unscoped lookup would hand somebody who tapped "buy access" and then "buy a
+// domain" the first invoice again -- charging them the wrong amount for the
+// wrong thing.
+func (r *BillingRepository) RecentPendingPayment(ctx context.Context, telegramUserID int64, product domain.Product, after time.Time) (*domain.Payment, error) {
 	p, err := scanPayment(r.pool.QueryRow(ctx, `
 		SELECT `+paymentColumns+`
 		FROM payments
-		WHERE telegram_user_id = $1 AND status = 'pending' AND created_at > $2
+		WHERE telegram_user_id = $1 AND product = $2 AND status = 'pending' AND created_at > $3
 		ORDER BY id DESC
-		LIMIT 1`, telegramUserID, after))
+		LIMIT 1`, telegramUserID, string(product), after))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.ErrNotFound
 	}
@@ -64,10 +72,11 @@ func (r *BillingRepository) RecentPendingPayment(ctx context.Context, telegramUs
 // CreatePayment records a newly issued invoice.
 func (r *BillingRepository) CreatePayment(ctx context.Context, p domain.Payment) (*domain.Payment, error) {
 	created, err := scanPayment(r.pool.QueryRow(ctx, `
-		INSERT INTO payments (invoice_id, telegram_user_id, amount, currency, access_days, status, pay_url)
-		VALUES ($1, $2, $3::text::numeric, $4, $5, $6, $7)
+		INSERT INTO payments (invoice_id, telegram_user_id, product, amount, currency, access_days, status, pay_url)
+		VALUES ($1, $2, $3, $4::text::numeric, $5, $6, $7, $8)
 		RETURNING `+paymentColumns,
-		p.InvoiceID, p.TelegramUserID, p.Amount, p.Currency, p.AccessDays, string(p.Status), p.PayURL))
+		p.InvoiceID, p.TelegramUserID, string(p.Product), p.Amount, p.Currency,
+		p.AccessDays, string(p.Status), p.PayURL))
 	if isUniqueViolation(err) {
 		return nil, domain.ErrAlreadyExists
 	}
@@ -89,44 +98,89 @@ func (r *BillingRepository) CreatePayment(ctx context.Context, p domain.Payment)
 // A payment the reconciler already marked expired is still confirmed here: if
 // the provider says an invoice is paid, the buyer paid, and the provider's word
 // outranks our own bookkeeping.
-func (r *BillingRepository) ConfirmPayment(ctx context.Context, invoiceID int64) (*domain.Subscription, bool, error) {
+func (r *BillingRepository) ConfirmPayment(ctx context.Context, invoiceID int64) (domain.Confirmation, error) {
+	var out domain.Confirmation
+
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return nil, false, fmt.Errorf("postgres: begin confirm: %w", err)
+		return out, fmt.Errorf("postgres: begin confirm: %w", err)
 	}
 	// Rollback after a successful Commit is a no-op, so this is safe to defer.
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var (
 		telegramUserID int64
-		accessDays     int
+		product        string
+		accessDays     *int
 	)
 	err = tx.QueryRow(ctx, `
 		UPDATE payments
 		SET status = 'paid', paid_at = now()
 		WHERE invoice_id = $1 AND status <> 'paid'
-		RETURNING telegram_user_id, access_days`, invoiceID).Scan(&telegramUserID, &accessDays)
+		RETURNING telegram_user_id, product, access_days`, invoiceID).
+		Scan(&telegramUserID, &product, &accessDays)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Already confirmed, or not an invoice we issued. Either way there is
 		// nothing to grant.
-		return nil, false, nil
+		return out, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("postgres: mark payment paid: %w", err)
+		return out, fmt.Errorf("postgres: mark payment paid: %w", err)
 	}
 
+	out = domain.Confirmation{
+		Confirmed:      true,
+		Product:        domain.Product(product),
+		TelegramUserID: telegramUserID,
+	}
+
+	switch out.Product {
+	case domain.ProductAccess:
+		if accessDays == nil {
+			return domain.Confirmation{}, fmt.Errorf("postgres: access payment %d has no access_days", invoiceID)
+		}
+		if err := extendAccess(ctx, tx, telegramUserID, *accessDays, &out); err != nil {
+			return domain.Confirmation{}, err
+		}
+	case domain.ProductDomain:
+		// A domain slot buys no days, so the subscription row may not exist
+		// yet. Inserting with paid_until = now() creates a lapsed row rather
+		// than granting free access: the slot is recorded, but the buyer still
+		// has to hold live access for the domain to serve anything.
+		err = tx.QueryRow(ctx, `
+			INSERT INTO subscriptions (telegram_user_id, paid_until, domain_slots)
+			VALUES ($1, now(), 1)
+			ON CONFLICT (telegram_user_id) DO UPDATE
+			SET domain_slots = subscriptions.domain_slots + 1,
+			    updated_at = now()
+			RETURNING domain_slots`, telegramUserID).Scan(&out.DomainSlots)
+		if err != nil {
+			return domain.Confirmation{}, fmt.Errorf("postgres: grant domain slot: %w", err)
+		}
+	default:
+		return domain.Confirmation{}, fmt.Errorf("postgres: payment %d has unknown product %q", invoiceID, product)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return domain.Confirmation{}, fmt.Errorf("postgres: commit confirm: %w", err)
+	}
+	return out, nil
+}
+
+// extendAccess moves the buyer's access window forward and drags every live key
+// along with it.
+func extendAccess(ctx context.Context, tx pgx.Tx, telegramUserID int64, accessDays int, out *domain.Confirmation) error {
 	// GREATEST stacks a renewal on top of the time still left, so paying early
 	// never forfeits the remainder of the current period.
-	sub := domain.Subscription{TelegramUserID: telegramUserID}
-	err = tx.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		INSERT INTO subscriptions (telegram_user_id, paid_until)
 		VALUES ($1, now() + make_interval(days => $2::int))
 		ON CONFLICT (telegram_user_id) DO UPDATE
 		SET paid_until = GREATEST(subscriptions.paid_until, now()) + make_interval(days => $2::int),
 		    updated_at = now()
-		RETURNING paid_until`, telegramUserID, accessDays).Scan(&sub.PaidUntil)
+		RETURNING paid_until`, telegramUserID, accessDays).Scan(&out.PaidUntil)
 	if err != nil {
-		return nil, false, fmt.Errorf("postgres: extend subscription: %w", err)
+		return fmt.Errorf("postgres: extend subscription: %w", err)
 	}
 
 	// Every live key follows the subscription, including ones that had already
@@ -134,14 +188,10 @@ func (r *BillingRepository) ConfirmPayment(ctx context.Context, invoiceID int64)
 	// without making them paste new secrets everywhere.
 	if _, err := tx.Exec(ctx, `
 		UPDATE api_keys SET expires_at = $2
-		WHERE telegram_user_id = $1 AND revoked_at IS NULL`, telegramUserID, sub.PaidUntil); err != nil {
-		return nil, false, fmt.Errorf("postgres: extend keys: %w", err)
+		WHERE telegram_user_id = $1 AND revoked_at IS NULL`, telegramUserID, out.PaidUntil); err != nil {
+		return fmt.Errorf("postgres: extend keys: %w", err)
 	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, false, fmt.Errorf("postgres: commit confirm: %w", err)
-	}
-	return &sub, true, nil
+	return nil
 }
 
 // ExpirePayment marks a pending invoice as expired.
@@ -183,7 +233,8 @@ func (r *BillingRepository) PendingPayments(ctx context.Context, createdAfter ti
 func (r *BillingRepository) Subscription(ctx context.Context, telegramUserID int64) (*domain.Subscription, error) {
 	sub := domain.Subscription{TelegramUserID: telegramUserID}
 	err := r.pool.QueryRow(ctx,
-		`SELECT paid_until FROM subscriptions WHERE telegram_user_id = $1`, telegramUserID).Scan(&sub.PaidUntil)
+		`SELECT paid_until, domain_slots, active_domain_id FROM subscriptions WHERE telegram_user_id = $1`,
+		telegramUserID).Scan(&sub.PaidUntil, &sub.DomainSlots, &sub.ActiveDomainID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.ErrNotFound
 	}

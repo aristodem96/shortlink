@@ -27,6 +27,10 @@ type Deps struct {
 	Limiter         RateLimiter
 	ReadinessChecks []ReadinessCheck
 	Logger          *slog.Logger
+	// Domains resolves customers' custom domains. Optional: when nil, every
+	// link is created on and served from BaseURL, and /internal/tls-check
+	// refuses every hostname.
+	Domains Domains
 
 	// BaseURL is the public origin used to render short URLs.
 	BaseURL string
@@ -41,10 +45,12 @@ type Deps struct {
 func NewRouter(deps Deps) http.Handler {
 	links := &linkHandler{
 		svc:        deps.Links,
+		domains:    deps.Domains,
 		log:        deps.Logger,
 		baseURL:    deps.BaseURL,
 		trustProxy: deps.TrustProxyHeaders,
 	}
+	tlsCheck := &tlsCheckHandler{domains: deps.Domains, log: deps.Logger}
 	health := &healthHandler{
 		checks:  deps.ReadinessChecks,
 		version: deps.Version,
@@ -82,6 +88,12 @@ func NewRouter(deps Deps) http.Handler {
 
 	r.Get("/openapi.yaml", serveSpec)
 	r.Get("/docs", serveDocs)
+
+	// Asked by the TLS terminator, over the private network, before it requests
+	// a certificate for a customer's domain. The reverse proxy blocks /internal
+	// from the outside; this route must never become publicly reachable, since
+	// answering it reveals which domains are registered.
+	r.Get("/internal/tls-check", tlsCheck.check)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(middleware.Timeout(apiRequestTimeout))

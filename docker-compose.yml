@@ -102,6 +102,11 @@ services:
       ACCESS_DAYS: ${ACCESS_DAYS:-5}
       MAX_KEYS_PER_USER: ${MAX_KEYS_PER_USER:-5}
       CRYPTOPAY_ASSETS: ${CRYPTOPAY_ASSETS:-USDT,TON}
+      CUSTOM_DOMAIN_PRICE_USD: ${CUSTOM_DOMAIN_PRICE_USD:-5}
+      # Empty locally: there is no public address to point a domain at, so the
+      # A-record check is skipped and any hostname can be registered for
+      # testing. Production sets this and the check becomes real.
+      SERVER_IP: ${SERVER_IP:-}
       INVOICE_TTL: ${INVOICE_TTL:-1h}
       # Locally this is what makes payments land at all: Crypto Pay has no public
       # URL to deliver a webhook to, so the invoice is confirmed by polling.

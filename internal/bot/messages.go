@@ -76,6 +76,13 @@ Send any URL — I'll shorten it
 /usekey <i>number</i> — choose the key the bot uses for links
 /revoke <i>number</i> — revoke a key
 
+<b>Custom domains</b>
+/buydomain — buy a slot for a domain of your own
+/adddomain <i>links.example.com</i> — register a domain you own
+/domains — your domains
+/usedomain <i>links.example.com</i> — choose the domain new links use
+/deldomain <i>links.example.com</i> — remove a domain
+
 Paying again adds days on top of the time you have left and extends all of your keys.`
 
 // tplCheckout: price, days.
@@ -172,3 +179,77 @@ const tplStatsLine = "\n%s — %d"
 const tplStatsDaysHeader = "\n\n<b>By day</b>"
 
 const msgNever = "never"
+
+// --- Custom domains ---------------------------------------------------------
+
+// tplBuyDomain: price.
+const tplBuyDomain = `A <b>custom domain</b> — one-off <b>$%s</b>.
+
+Your links become <code>https://your-domain/abc1234</code> instead of mine, and the HTTPS certificate is issued automatically.
+
+A domain serves links only while your API access is active.
+
+Tap the button to pay in @CryptoBot.`
+
+// tplDomainSlotGranted: slot count.
+const tplDomainSlotGranted = `✅ Payment received!
+
+You now have <b>%d</b> custom domain slot(s).
+
+<b>Next:</b> point your domain at this server with a DNS <code>A</code> record, then run
+<code>/adddomain links.example.com</code>`
+
+const msgAddDomainUsage = `Send the domain you want to use, for example:
+<code>/adddomain links.example.com</code>
+
+It must already have an <code>A</code> record pointing at this server.`
+
+const msgUseDomainUsage = "Which domain? For example: <code>/usedomain links.example.com</code>"
+
+const msgDelDomainUsage = "Which domain? For example: <code>/deldomain links.example.com</code>"
+
+// tplNoDomainSlot: price.
+const tplNoDomainSlot = `You have used every custom domain slot you have.
+
+/buydomain — add another for <b>$%s</b>.`
+
+// tplNoDomains: price.
+const tplNoDomains = `You have no custom domains yet.
+
+With one, your links look like <code>https://your-domain/abc1234</code>.
+
+/buydomain — <b>$%s</b> one-off.`
+
+const msgDomainTaken = "That domain is already registered. If it is yours and you removed it earlier, contact support."
+
+// tplDomainNotPointed: hostname.
+const tplDomainNotPointed = `<code>%s</code> does not point at this server yet.
+
+Add a DNS <code>A</code> record for it with this server's IP address, wait for it to propagate, then try again. It usually takes a few minutes.`
+
+// tplBadDomain: reason.
+const tplBadDomain = "That domain will not work: %s"
+
+// tplDomainAdded: hostname.
+const tplDomainAdded = `✅ <code>%s</code> is registered and will be used for new links.
+
+The HTTPS certificate is issued the first time somebody opens one — no action needed.`
+
+const tplDomainsHeader = "<b>Your domains</b>\n"
+
+// tplDomainLine: hostname, active marker.
+const tplDomainLine = "\n<code>%s</code>%s"
+
+const domainActiveMarker = " ← used for new links"
+
+const tplDomainsFooter = "\n\nChange with <code>/usedomain domain</code>"
+
+const msgDomainUnknown = "You have no such domain. /domains lists yours."
+
+// tplDomainInUse: hostname.
+const tplDomainInUse = "New links will now use <code>%s</code>."
+
+// tplDomainRemoved: hostname.
+const tplDomainRemoved = `<code>%s</code> removed.
+
+Links that used it fall back to the default domain rather than breaking. The slot stays yours — /adddomain to use it for another domain.`

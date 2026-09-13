@@ -17,7 +17,12 @@ import (
 // can never be confused with a serialised link.
 const missingSentinel = "\x00missing"
 
-const keyPrefix = "link:"
+// keyPrefix is versioned. Entries written before custom domains existed carry
+// no hostname, and decoding one would produce a link that looks like it belongs
+// on the operator's domain -- serving a customer's branded link on the wrong
+// host until the entry expired. Changing the prefix retires that whole
+// keyspace at once; the stale entries fall out on their own TTL.
+const keyPrefix = "link2:"
 
 // LinkCache caches resolved links in Redis. It satisfies service.LinkCache.
 type LinkCache struct {
@@ -38,6 +43,8 @@ type cachedLink struct {
 	Code      string     `json:"c"`
 	TargetURL string     `json:"u"`
 	OwnerID   int64      `json:"o"`
+	DomainID  *int64     `json:"d,omitempty"`
+	Host      string     `json:"h,omitempty"`
 	ExpiresAt *time.Time `json:"e,omitempty"`
 	CreatedAt time.Time  `json:"t"`
 }
@@ -67,6 +74,8 @@ func (c *LinkCache) Get(ctx context.Context, code string) (*domain.Link, error) 
 		Code:      cl.Code,
 		TargetURL: cl.TargetURL,
 		OwnerID:   cl.OwnerID,
+		DomainID:  cl.DomainID,
+		Host:      cl.Host,
 		ExpiresAt: cl.ExpiresAt,
 		CreatedAt: cl.CreatedAt,
 	}, nil
@@ -91,6 +100,8 @@ func (c *LinkCache) Set(ctx context.Context, link *domain.Link, ttl time.Duratio
 		Code:      link.Code,
 		TargetURL: link.TargetURL,
 		OwnerID:   link.OwnerID,
+		DomainID:  link.DomainID,
+		Host:      link.Host,
 		ExpiresAt: link.ExpiresAt,
 		CreatedAt: link.CreatedAt,
 	})

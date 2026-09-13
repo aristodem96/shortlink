@@ -2,9 +2,12 @@ package postgres
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -56,22 +59,54 @@ type noopHasher struct{}
 
 func (noopHasher) HashIP(string) []byte { return nil }
 
-type stubProvider struct{}
+// stubProvider mints one invoice id per call, starting at 4242. Ids have to be
+// distinct because payments.invoice_id is UNIQUE: a provider that reused one
+// would make the second purchase fail, which is a property of the stub rather
+// than of the code under test.
+type stubProvider struct{ issued atomic.Int64 }
 
-func (stubProvider) CreateInvoice(context.Context, cryptopay.InvoiceRequest) (cryptopay.Invoice, error) {
-	return cryptopay.Invoice{InvoiceID: 4242, Status: cryptopay.StatusActive, BotInvoiceURL: "https://t.me/CryptoBot?start=IV4242"}, nil
+const firstInvoice = 4242
+
+func (p *stubProvider) CreateInvoice(context.Context, cryptopay.InvoiceRequest) (cryptopay.Invoice, error) {
+	id := firstInvoice + p.issued.Add(1) - 1
+	return cryptopay.Invoice{
+		InvoiceID:     id,
+		Status:        cryptopay.StatusActive,
+		BotInvoiceURL: fmt.Sprintf("https://t.me/CryptoBot?start=IV%d", id),
+	}, nil
 }
 
-func (stubProvider) GetInvoices(context.Context, []int64) ([]cryptopay.Invoice, error) {
+func (p *stubProvider) GetInvoices(context.Context, []int64) ([]cryptopay.Invoice, error) {
 	return nil, nil
 }
 
-type stubNotifier struct{ paid int }
+type stubNotifier struct {
+	paid  int
+	slots int
+}
 
 func (n *stubNotifier) PaymentConfirmed(context.Context, int64, time.Time) error {
 	n.paid++
 	return nil
 }
+
+func (n *stubNotifier) DomainSlotGranted(_ context.Context, _ int64, slots int) error {
+	n.slots = slots
+	return nil
+}
+
+// stubResolver answers domain verification without touching DNS, so the flow
+// can be walked end to end without a public hostname.
+type stubResolver struct{ addrs map[string][]string }
+
+func (r stubResolver) LookupHost(_ context.Context, host string) ([]string, error) {
+	if a, ok := r.addrs[host]; ok {
+		return a, nil
+	}
+	return nil, errors.New("no such host")
+}
+
+const testServerIP = "203.0.113.45"
 
 func chat(text string) telegram.Update {
 	return telegram.Update{Message: &telegram.Message{
@@ -92,9 +127,13 @@ func TestBotFlow_BuyThenShortenThenSeeClicks(t *testing.T) {
 		service.LinkServiceConfig{CacheTTL: time.Hour, NegativeCacheTTL: 30 * time.Second}, discard,
 	)
 	notifier := &stubNotifier{}
-	svc := billing.New(store, stubProvider{}, notifier, billing.Config{
-		PriceUSD: "10", AccessDays: 5, MaxKeys: 5, AcceptedAssets: []string{"USDT"}, InvoiceTTL: time.Hour,
-	}, discard)
+	svc := billing.New(store, &stubProvider{}, notifier,
+		stubResolver{addrs: map[string][]string{"links.example.com": {testServerIP}}},
+		[]string{testServerIP},
+		billing.Config{
+			PriceUSD: "10", DomainPriceUSD: "5", AccessDays: 5, MaxKeys: 5,
+			AcceptedAssets: []string{"USDT"}, InvoiceTTL: time.Hour,
+		}, discard)
 
 	msgs := &captureMessenger{}
 	b := bot.New(msgs, nil, svc, links, "https://sho.rt", time.UTC, discard)
@@ -155,8 +194,8 @@ func TestBotFlow_TheDomainRulesApplyToLinksMadeInChat(t *testing.T) {
 		NewLinkRepository(testPool), noopCache{}, noopClicks{}, codes, noopHasher{},
 		service.LinkServiceConfig{CacheTTL: time.Hour, NegativeCacheTTL: 30 * time.Second}, discard,
 	)
-	svc := billing.New(store, stubProvider{}, &stubNotifier{}, billing.Config{
-		PriceUSD: "10", AccessDays: 5, MaxKeys: 5, InvoiceTTL: time.Hour,
+	svc := billing.New(store, &stubProvider{}, &stubNotifier{}, nil, nil, billing.Config{
+		PriceUSD: "10", DomainPriceUSD: "5", AccessDays: 5, MaxKeys: 5, InvoiceTTL: time.Hour,
 	}, discard)
 
 	msgs := &captureMessenger{}
@@ -195,8 +234,8 @@ func TestBotFlow_ExpiredAccessStopsTheChatToo(t *testing.T) {
 		NewLinkRepository(testPool), noopCache{}, noopClicks{}, codes, noopHasher{},
 		service.LinkServiceConfig{CacheTTL: time.Hour, NegativeCacheTTL: 30 * time.Second}, discard,
 	)
-	svc := billing.New(store, stubProvider{}, &stubNotifier{}, billing.Config{
-		PriceUSD: "10", AccessDays: 5, MaxKeys: 5, InvoiceTTL: time.Hour,
+	svc := billing.New(store, &stubProvider{}, &stubNotifier{}, nil, nil, billing.Config{
+		PriceUSD: "10", DomainPriceUSD: "5", AccessDays: 5, MaxKeys: 5, InvoiceTTL: time.Hour,
 	}, discard)
 
 	msgs := &captureMessenger{}
@@ -222,4 +261,79 @@ func TestBotFlow_ExpiredAccessStopsTheChatToo(t *testing.T) {
 
 	_, err = NewLinkRepository(testPool).GetByCode(ctx, "after-lapse")
 	assert.ErrorIs(t, err, domain.ErrNotFound, "nothing was created")
+}
+
+// TestBotFlow_BuyADomainThenShortenOnIt walks the whole add-on the way a buyer
+// does: pay for access, pay for a domain, point DNS, register it, and see the
+// next link come back on their own hostname.
+func TestBotFlow_BuyADomainThenShortenOnIt(t *testing.T) {
+	store := setupBilling(t)
+	ctx := context.Background()
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	codes, err := shortid.NewGenerator(7)
+	require.NoError(t, err)
+	links := service.NewLinkService(
+		NewLinkRepository(testPool), noopCache{}, noopClicks{}, codes, noopHasher{},
+		service.LinkServiceConfig{CacheTTL: time.Hour, NegativeCacheTTL: 30 * time.Second}, discard,
+	)
+	notifier := &stubNotifier{}
+	svc := billing.New(store, &stubProvider{}, notifier,
+		stubResolver{addrs: map[string][]string{"links.example.com": {testServerIP}}},
+		[]string{testServerIP},
+		billing.Config{
+			PriceUSD: "10", DomainPriceUSD: "5", AccessDays: 5, MaxKeys: 5,
+			AcceptedAssets: []string{"USDT"}, InvoiceTTL: time.Hour,
+		}, discard)
+
+	msgs := &captureMessenger{}
+	b := bot.New(msgs, nil, svc, links, "https://sho.rt", time.UTC, discard)
+
+	// Access first, so there is a key to shorten with.
+	b.Handle(ctx, chat("/buy"))
+	require.NoError(t, svc.Confirm(ctx, 4242))
+	b.Handle(ctx, chat("/newkey"))
+
+	// Without a slot, registering a domain is refused and points at the till.
+	b.Handle(ctx, chat("/adddomain links.example.com"))
+	assert.Contains(t, msgs.last(t), "/buydomain")
+
+	// Buy the slot. The stub provider reuses invoice 4242, so the pending
+	// access payment must not be what gets confirmed here -- the products are
+	// separate rows.
+	b.Handle(ctx, chat("/buydomain"))
+	assert.Contains(t, msgs.last(t), "$5")
+
+	sub, err := store.Subscription(ctx, 4242)
+	require.NoError(t, err)
+	require.Equal(t, 0, sub.DomainSlots, "nothing is granted until the invoice is paid")
+
+	// Settle the domain invoice directly: the stub provider cannot mint a
+	// second id, so take the pending domain payment as it was recorded.
+	pending, err := store.RecentPendingPayment(ctx, 4242, domain.ProductDomain, time.Now().Add(-time.Hour))
+	require.NoError(t, err)
+	require.NoError(t, svc.Confirm(ctx, pending.InvoiceID))
+	assert.Equal(t, 1, notifier.slots)
+
+	// A domain that does not point here is refused.
+	b.Handle(ctx, chat("/adddomain elsewhere.example.com"))
+	assert.Contains(t, msgs.last(t), "does not point at this server")
+
+	// The real one is accepted and becomes the active domain.
+	b.Handle(ctx, chat("/adddomain links.example.com"))
+	assert.Contains(t, msgs.last(t), "links.example.com")
+
+	b.Handle(ctx, chat("/domains"))
+	assert.Contains(t, msgs.last(t), "links.example.com")
+
+	// And the next link is rendered on it, not on the operator's domain.
+	b.Handle(ctx, chat("https://go.dev/blog/context my-promo"))
+	assert.Contains(t, msgs.last(t), "https://links.example.com/my-promo")
+	assert.NotContains(t, msgs.last(t), "https://sho.rt/my-promo")
+
+	// The stamp is durable: it is stored on the row, not derived at render time.
+	stored, err := NewLinkRepository(testPool).GetByCode(ctx, "my-promo")
+	require.NoError(t, err)
+	require.NotNil(t, stored.DomainID)
+	assert.Equal(t, "links.example.com", stored.Host)
 }

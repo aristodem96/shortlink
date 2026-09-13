@@ -23,7 +23,16 @@ func NewLinkRepository(pool *pgxpool.Pool) *LinkRepository {
 	return &LinkRepository{pool: pool}
 }
 
-const linkColumns = `id, code, target_url, owner_id, expires_at, created_at`
+// linkColumns selects from links aliased as l, joined to custom_domains as d.
+// The hostname rides along with every read so the redirect path can check the
+// request's Host without a second query.
+const linkColumns = `l.id, l.code, l.target_url, l.owner_id, l.domain_id,
+	coalesce(d.hostname, ''), l.expires_at, l.created_at`
+
+// linkSource is the FROM clause every link read shares. The join is LEFT
+// because domain_id is NULL for links on the operator's own domain, which is
+// every link created before custom domains existed.
+const linkSource = `FROM links l LEFT JOIN custom_domains d ON d.id = l.domain_id`
 
 // Create inserts a link and fills in its generated ID.
 //
@@ -33,13 +42,13 @@ const linkColumns = `id, code, target_url, owner_id, expires_at, created_at`
 // callers claiming the same alias.
 func (r *LinkRepository) Create(ctx context.Context, link *domain.Link) error {
 	const query = `
-		INSERT INTO links (code, target_url, owner_id, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO links (code, target_url, owner_id, domain_id, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT (code) DO NOTHING
 		RETURNING id, created_at`
 
 	err := r.pool.QueryRow(ctx, query,
-		link.Code, link.TargetURL, link.OwnerID, link.ExpiresAt, link.CreatedAt,
+		link.Code, link.TargetURL, link.OwnerID, link.DomainID, link.ExpiresAt, link.CreatedAt,
 	).Scan(&link.ID, &link.CreatedAt)
 
 	switch {
@@ -53,7 +62,7 @@ func (r *LinkRepository) Create(ctx context.Context, link *domain.Link) error {
 
 // GetByCode loads a link by its short code.
 func (r *LinkRepository) GetByCode(ctx context.Context, code string) (*domain.Link, error) {
-	const query = `SELECT ` + linkColumns + ` FROM links WHERE code = $1`
+	const query = `SELECT ` + linkColumns + ` ` + linkSource + ` WHERE l.code = $1`
 
 	link, err := r.queryOne(ctx, query, code)
 	if err != nil {
@@ -64,7 +73,7 @@ func (r *LinkRepository) GetByCode(ctx context.Context, code string) (*domain.Li
 
 // GetOwnedByCode loads a link scoped to one owner.
 func (r *LinkRepository) GetOwnedByCode(ctx context.Context, ownerID int64, code string) (*domain.Link, error) {
-	const query = `SELECT ` + linkColumns + ` FROM links WHERE owner_id = $1 AND code = $2`
+	const query = `SELECT ` + linkColumns + ` ` + linkSource + ` WHERE l.owner_id = $1 AND l.code = $2`
 
 	link, err := r.queryOne(ctx, query, ownerID, code)
 	if err != nil {
@@ -76,7 +85,7 @@ func (r *LinkRepository) GetOwnedByCode(ctx context.Context, ownerID int64, code
 func (r *LinkRepository) queryOne(ctx context.Context, query string, args ...any) (*domain.Link, error) {
 	var l domain.Link
 	err := r.pool.QueryRow(ctx, query, args...).
-		Scan(&l.ID, &l.Code, &l.TargetURL, &l.OwnerID, &l.ExpiresAt, &l.CreatedAt)
+		Scan(&l.ID, &l.Code, &l.TargetURL, &l.OwnerID, &l.DomainID, &l.Host, &l.ExpiresAt, &l.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Wrapped by the caller, so errors.Is still finds the sentinel.
 		return nil, domain.ErrNotFound
@@ -95,9 +104,9 @@ func (r *LinkRepository) queryOne(ctx context.Context, query string, args ...any
 func (r *LinkRepository) ListByOwner(ctx context.Context, ownerID int64, limit, offset int) ([]domain.Link, int64, error) {
 	const query = `
 		SELECT ` + linkColumns + `, COUNT(*) OVER() AS total
-		FROM links
-		WHERE owner_id = $1
-		ORDER BY created_at DESC, id DESC
+		` + linkSource + `
+		WHERE l.owner_id = $1
+		ORDER BY l.created_at DESC, l.id DESC
 		LIMIT $2 OFFSET $3`
 
 	rows, err := r.pool.Query(ctx, query, ownerID, limit, offset)
@@ -110,7 +119,8 @@ func (r *LinkRepository) ListByOwner(ctx context.Context, ownerID int64, limit, 
 	var total int64
 	for rows.Next() {
 		var l domain.Link
-		if err := rows.Scan(&l.ID, &l.Code, &l.TargetURL, &l.OwnerID, &l.ExpiresAt, &l.CreatedAt, &total); err != nil {
+		if err := rows.Scan(&l.ID, &l.Code, &l.TargetURL, &l.OwnerID, &l.DomainID, &l.Host,
+			&l.ExpiresAt, &l.CreatedAt, &total); err != nil {
 			return nil, 0, fmt.Errorf("postgres: scan link: %w", err)
 		}
 		links = append(links, l)

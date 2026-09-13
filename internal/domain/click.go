@@ -17,7 +17,11 @@ type Click struct {
 
 // LinkStats is the aggregated view of a link's traffic over a time window.
 type LinkStats struct {
-	Code           string       `json:"code"`
+	Code string `json:"code"`
+	// Host is the custom domain the link is served on, empty for the
+	// operator's own. It rides along so callers can render the link's public
+	// address without loading it a second time.
+	Host           string       `json:"-"`
 	TotalClicks    int64        `json:"total_clicks"`
 	UniqueVisitors int64        `json:"unique_visitors"`
 	LastClickAt    *time.Time   `json:"last_click_at,omitempty"`

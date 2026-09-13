@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -29,12 +31,25 @@ type LinkService interface {
 	Stats(ctx context.Context, ownerID int64, code string, window time.Duration) (*domain.LinkStats, error)
 }
 
+// Domains is the custom-domain lookup the transport needs. It is optional:
+// when nil, every link is created on and served from the operator's domain,
+// which is how the service behaved before custom domains existed.
+type Domains interface {
+	// ActiveDomain returns the domain a buyer's new links are stamped with, or
+	// domain.ErrNotFound.
+	ActiveDomain(ctx context.Context, telegramUserID int64) (*domain.CustomDomain, error)
+	// ServableDomain returns a hostname that may be served right now:
+	// registered, verified, and owned by somebody with live access.
+	ServableDomain(ctx context.Context, hostname string) (*domain.CustomDomain, error)
+}
+
 // maxRequestBody caps how much of a request body is read. Without it a client
 // could stream gigabytes into json.Decode.
 const maxRequestBody = 16 << 10 // 16 KiB
 
 type linkHandler struct {
 	svc        LinkService
+	domains    Domains
 	log        *slog.Logger
 	baseURL    string
 	trustProxy bool
@@ -63,14 +78,43 @@ type listLinksResponse struct {
 	Offset int            `json:"offset"`
 }
 
+// toResponse renders a link. A link stamped with a custom domain is always
+// shown on that domain rather than on the request's host, so the address in the
+// response is the one that will keep working after the owner switches domains.
 func (h *linkHandler) toResponse(l *domain.Link) linkResponse {
+	origin := h.baseURL
+	if l.Host != "" {
+		origin = "https://" + l.Host
+	}
 	return linkResponse{
 		Code:      l.Code,
-		ShortURL:  h.baseURL + "/" + l.Code,
+		ShortURL:  origin + "/" + l.Code,
 		TargetURL: l.TargetURL,
 		ExpiresAt: l.ExpiresAt,
 		CreatedAt: l.CreatedAt,
 	}
+}
+
+// activeDomain resolves the custom domain a key's new links belong to.
+//
+// Anything unexpected here degrades to the operator's domain rather than
+// failing the request: a link on the default host still works, whereas refusing
+// to shorten would be a worse answer to "the domain lookup was slow".
+func (h *linkHandler) activeDomain(ctx context.Context, key *domain.APIKey) (*int64, string) {
+	if h.domains == nil || key.TelegramUserID == nil {
+		return nil, ""
+	}
+
+	d, err := h.domains.ActiveDomain(ctx, *key.TelegramUserID)
+	switch {
+	case errors.Is(err, domain.ErrNotFound):
+		return nil, ""
+	case err != nil:
+		h.log.WarnContext(ctx, "could not read the active domain",
+			slog.Int64("owner_id", key.ID), slog.Any("error", err))
+		return nil, ""
+	}
+	return &d.ID, d.Hostname
 }
 
 // create handles POST /api/v1/links.
@@ -89,8 +133,12 @@ func (h *linkHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	domainID, host := h.activeDomain(ctx, key)
+
 	link, err := h.svc.Create(ctx, service.CreateLinkInput{
 		OwnerID:   key.ID,
+		DomainID:  domainID,
+		Host:      host,
 		TargetURL: req.TargetURL,
 		Alias:     req.Alias,
 		ExpiresAt: req.ExpiresAt,
@@ -229,6 +277,18 @@ func (h *linkHandler) redirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A link that belongs to a custom domain is served only on that domain.
+	// Without this a customer's branded link would also answer on every other
+	// hostname this server terminates TLS for -- including a competitor's.
+	//
+	// The answer is 404, exactly what an unknown code returns, so that probing
+	// one customer's domain cannot enumerate another's codes.
+	if link.Host != "" && !strings.EqualFold(requestHost(r), link.Host) {
+		observability.Redirects.WithLabelValues("wrong_host").Inc()
+		writeError(ctx, w, h.log, domain.ErrNotFound)
+		return
+	}
+
 	h.svc.RecordClick(link, service.ClickMeta{
 		Referer:   r.Referer(),
 		UserAgent: r.UserAgent(),
@@ -250,6 +310,20 @@ func (h *linkHandler) redirect(w http.ResponseWriter, r *http.Request) {
 	// http(s) scheme, and never a private, loopback or link-local address.
 	//nolint:gosec // G710: intentional redirect to a previously validated target.
 	http.Redirect(w, r, link.TargetURL, http.StatusFound)
+}
+
+// requestHost is the hostname the request was addressed to, without any port.
+//
+// r.Host is used rather than X-Forwarded-Host: the reverse proxy in front of
+// this service rewrites Host to the name it matched, and a client-supplied
+// forwarding header must never be allowed to decide which customer's links are
+// visible.
+func requestHost(r *http.Request) string {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return strings.TrimSuffix(host, ".")
 }
 
 // decodeJSON reads a bounded, strictly typed JSON body.

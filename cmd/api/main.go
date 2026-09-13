@@ -127,7 +127,11 @@ func run() error {
 			{Name: "postgres", Probe: pool.Ping},
 			{Name: "redis", Probe: func(ctx context.Context) error { return rdb.Ping(ctx).Err() }},
 		},
-		Logger:            log,
+		Logger: log,
+		// The same repository the bot writes domains through. The API only
+		// reads it: to stamp new links, and to answer the TLS terminator's
+		// question about which hostnames may be served.
+		Domains:           postgres.NewBillingRepository(pool),
 		BaseURL:           cfg.BaseURL,
 		Version:           version,
 		TrustProxyHeaders: cfg.TrustProxyHeaders,

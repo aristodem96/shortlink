@@ -99,6 +99,15 @@ func NewLinkService(
 type CreateLinkInput struct {
 	OwnerID   int64
 	TargetURL string
+	// DomainID stamps the link with one of the owner's custom domains. It is
+	// fixed at creation so a link already shared keeps the hostname it was
+	// shared with, even if the owner later switches domains. nil means the
+	// operator's own domain.
+	DomainID *int64
+	// Host is DomainID's hostname. The caller has already loaded the domain to
+	// get the id, so passing the name along saves the insert a join just to
+	// render the link that is about to be returned.
+	Host string
 	// Alias, when non-empty, is used verbatim instead of a random code.
 	Alias string
 	// ExpiresAt, when set, makes the link stop redirecting at that instant.
@@ -120,6 +129,8 @@ func (s *LinkService) Create(ctx context.Context, in CreateLinkInput) (*domain.L
 	link := &domain.Link{
 		TargetURL: target,
 		OwnerID:   in.OwnerID,
+		DomainID:  in.DomainID,
+		Host:      in.Host,
 		ExpiresAt: in.ExpiresAt,
 		CreatedAt: now,
 	}
@@ -326,6 +337,7 @@ func (s *LinkService) Stats(ctx context.Context, ownerID int64, code string, win
 		return nil, err
 	}
 	stats.Code = link.Code
+	stats.Host = link.Host
 	return stats, nil
 }
 

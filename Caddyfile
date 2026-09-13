@@ -1,6 +1,25 @@
-# Caddy obtains and renews a Let's Encrypt certificate for this domain on its
-# own; there is no certbot step and no cron job to forget.
-{$SHORTLINK_DOMAIN} {
+# Caddy obtains and renews Let's Encrypt certificates on its own; there is no
+# certbot step and no cron job to forget.
+{
+	# On-demand TLS issues a certificate during the handshake for a hostname
+	# that is not listed anywhere in this file -- which is how a customer's own
+	# domain starts working the moment they point DNS here.
+	#
+	# `ask` is mandatory, not a refinement. Without it, anyone who points a DNS
+	# record at this server makes it request a certificate for a name they
+	# chose. Let's Encrypt limits new orders per account, so a stranger could
+	# exhaust the quota and take HTTPS down for the operator's own domains as
+	# well. The endpoint answers 200 only for a hostname that is registered,
+	# verified, and owned by somebody whose access has not lapsed.
+	on_demand_tls {
+		ask http://api:8080/internal/tls-check
+	}
+}
+
+# The routing is identical whichever hostname the request arrived on. The API
+# decides what a given host may serve: a link stamped with a custom domain is
+# returned only on that domain, and 404 elsewhere.
+(shortlink_routes) {
 	encode zstd gzip
 
 	# /metrics is a single global dump of every counter in the process: total
@@ -9,13 +28,16 @@
 	# /api/v1/links/{code}/stats, which is authenticated and scoped to their
 	# key -- so exposing it publicly leaks operational data and gives nothing
 	# back. /readyz reports which dependency is down, which is useful mainly to
-	# someone timing an attack. Reach both over the compose network or an SSH
-	# tunnel.
+	# someone timing an attack. /internal is the on-demand TLS gate: answering
+	# it publicly would reveal which customer domains are registered, and it is
+	# reached over the compose network, never from outside.
+	#
+	# Reach any of them over the compose network or an SSH tunnel.
 	#
 	# /healthz stays public on purpose: it answers {"status":"ok"} without
 	# touching a dependency, and an external uptime monitor needs somewhere to
 	# knock.
-	@internal path /metrics /readyz
+	@internal path /metrics /readyz /internal /internal/*
 
 	# handle blocks are mutually exclusive, and the one without a matcher is
 	# always tried last -- which is what lets the 404 and the webhook route sit
@@ -44,4 +66,25 @@
 			header_up X-Real-IP {remote_host}
 		}
 	}
+}
+
+# The operator's own domains. Listed explicitly, so their certificates are
+# obtained at startup rather than on the first request.
+#
+# EXTRA_DOMAINS is for hostnames this service used to be reached at and still
+# has to answer on, so links already shared keep working after a move. Set it in
+# .env as a SPACE-separated list -- EXTRA_DOMAINS="old.example older.example" --
+# because Caddy reads site addresses separated by spaces and rejects a bare
+# comma. Leave it empty and only SHORTLINK_DOMAIN is served here.
+{$SHORTLINK_DOMAIN} {$EXTRA_DOMAINS} {
+	import shortlink_routes
+}
+
+# Every other hostname: a customer's domain. The certificate is requested during
+# the first handshake, once the ask endpoint above approves it.
+https:// {
+	tls {
+		on_demand
+	}
+	import shortlink_routes
 }

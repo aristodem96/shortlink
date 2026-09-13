@@ -19,6 +19,7 @@ var configKeys = []string{
 	"TELEGRAM_BOT_TOKEN", "CRYPTOPAY_TOKEN", "CRYPTOPAY_NETWORK", "PRICE_USD",
 	"ACCESS_DAYS", "MAX_KEYS_PER_USER", "CRYPTOPAY_ASSETS", "INVOICE_TTL",
 	"RECONCILE_INTERVAL", "BOT_HTTP_ADDR", "BOT_TIMEZONE",
+	"TELEGRAM_API_URL", "CUSTOM_DOMAIN_PRICE_USD", "SERVER_IP",
 }
 
 // isolateEnv blanks every configuration variable for the duration of one test.
@@ -190,6 +191,37 @@ func TestLoadBot_ValidatesThePrice(t *testing.T) {
 			assert.NoError(t, err)
 		})
 	}
+}
+
+func TestLoadBot_ValidatesTheDomainPrice(t *testing.T) {
+	for _, price := range []string{"0", "-5", "5.999", "five", " "} {
+		t.Run(price, func(t *testing.T) {
+			setBotEnv(t)
+			t.Setenv("CUSTOM_DOMAIN_PRICE_USD", price)
+
+			_, err := LoadBot()
+			require.Error(t, err, "domain price %q must be rejected", price)
+			assert.Contains(t, err.Error(), "CUSTOM_DOMAIN_PRICE_USD")
+		})
+	}
+
+	t.Run("defaults to 5", func(t *testing.T) {
+		setBotEnv(t)
+		cfg, err := LoadBot()
+		require.NoError(t, err)
+		assert.Equal(t, "5", cfg.DomainPriceUSD)
+	})
+}
+
+func TestLoadBot_ReadsServerIPAsAList(t *testing.T) {
+	setBotEnv(t)
+	// Case is preserved: an IPv6 literal is compared verbatim against what the
+	// resolver returns, which is lower case.
+	t.Setenv("SERVER_IP", "203.0.113.45, 2001:db8::1 ")
+
+	cfg, err := LoadBot()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"203.0.113.45", "2001:db8::1"}, cfg.ServerIP)
 }
 
 func TestLoadBot_RejectsAnUnknownNetwork(t *testing.T) {

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -672,4 +673,150 @@ func TestUnknownRoutesAndMethodsReturnJSON(t *testing.T) {
 		require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 		assert.Equal(t, "method_not_allowed", decodeError(t, rec).Code)
 	})
+}
+
+// stubDomains answers the custom-domain lookups without a database.
+type stubDomains struct {
+	active   *domain.CustomDomain
+	servable map[string]*domain.CustomDomain
+	err      error
+}
+
+func (d stubDomains) ActiveDomain(context.Context, int64) (*domain.CustomDomain, error) {
+	if d.err != nil {
+		return nil, d.err
+	}
+	if d.active == nil {
+		return nil, domain.ErrNotFound
+	}
+	return d.active, nil
+}
+
+func (d stubDomains) ServableDomain(_ context.Context, hostname string) (*domain.CustomDomain, error) {
+	if d.err != nil {
+		return nil, d.err
+	}
+	if cd, ok := d.servable[hostname]; ok {
+		return cd, nil
+	}
+	return nil, domain.ErrNotFound
+}
+
+// TestRedirect_ServesACustomDomainLinkOnlyOnItsOwnHost is the isolation
+// guarantee between customers: without it a branded link would answer on every
+// hostname this server terminates TLS for, including a competitor's.
+func TestRedirect_ServesACustomDomainLinkOnlyOnItsOwnHost(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestServer(t)
+	ts.svc.resolved = &domain.Link{
+		ID: 3, Code: "abc1234", Host: "links.example.com",
+		TargetURL: "https://go.dev/blog/context",
+	}
+
+	t.Run("right host redirects", func(t *testing.T) {
+		rec := ts.do(t, http.MethodGet, "http://links.example.com/abc1234", "", nil)
+		require.Equal(t, http.StatusFound, rec.Code)
+		assert.Equal(t, "https://go.dev/blog/context", rec.Header().Get("Location"))
+	})
+
+	t.Run("host comparison ignores case and port", func(t *testing.T) {
+		rec := ts.do(t, http.MethodGet, "http://Links.Example.COM:443/abc1234", "", nil)
+		assert.Equal(t, http.StatusFound, rec.Code)
+	})
+
+	t.Run("wrong host is a 404, not a 403", func(t *testing.T) {
+		before := len(ts.svc.recordedClicks())
+
+		rec := ts.do(t, http.MethodGet, "http://other.example.com/abc1234", "", nil)
+		require.Equal(t, http.StatusNotFound, rec.Code,
+			"the same answer as an unknown code, so one customer's domain cannot enumerate another's")
+		assert.Contains(t, rec.Body.String(), "not_found")
+		assert.Len(t, ts.svc.recordedClicks(), before,
+			"a refused redirect must not be counted as a click")
+	})
+}
+
+func TestRedirect_ALinkWithoutADomainStillServesAnywhere(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestServer(t)
+	ts.svc.resolved = &domain.Link{ID: 4, Code: "abc1234", TargetURL: "https://example.com"}
+
+	// This is what keeps a previously used hostname working after the operator
+	// moves to a new one.
+	rec := ts.do(t, http.MethodGet, "http://old-domain.example/abc1234", "", nil)
+	assert.Equal(t, http.StatusFound, rec.Code)
+}
+
+func TestCreateLink_RendersTheOwnersCustomDomain(t *testing.T) {
+	t.Parallel()
+
+	owner := int64(4242)
+	ts := newTestServer(t, func(d *Deps) {
+		d.Auth = stubAuth{key: &domain.APIKey{ID: 7, Name: "test", TelegramUserID: &owner}}
+		d.Domains = stubDomains{active: &domain.CustomDomain{ID: 9, Hostname: "links.example.com"}}
+	})
+	ts.svc.created = &domain.Link{
+		ID: 1, Code: "abc1234", Host: "links.example.com",
+		TargetURL: "https://example.com", CreatedAt: time.Now(),
+	}
+
+	rec := ts.authed(t, http.MethodPost, "/api/v1/links", `{"target_url":"https://example.com"}`)
+
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var got linkResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, "https://links.example.com/abc1234", got.ShortURL,
+		"the short URL must use the owner's domain, not the service's BaseURL")
+	assert.Equal(t, got.ShortURL, rec.Header().Get("Location"))
+
+	// The link was stamped so it keeps that hostname for good.
+	require.NotNil(t, ts.svc.lastCreateInput.DomainID)
+	assert.Equal(t, int64(9), *ts.svc.lastCreateInput.DomainID)
+}
+
+func TestTLSCheck_OnlyApprovesAServableDomain(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestServer(t, func(d *Deps) {
+		d.Domains = stubDomains{servable: map[string]*domain.CustomDomain{
+			"links.example.com": {ID: 9, Hostname: "links.example.com"},
+		}}
+	})
+
+	tests := map[string]struct {
+		query string
+		want  int
+	}{
+		"registered and paid": {query: "?domain=links.example.com", want: http.StatusOK},
+		"canonicalised first": {query: "?domain=Links.Example.COM", want: http.StatusOK},
+		"unknown domain":      {query: "?domain=attacker.example", want: http.StatusForbidden},
+		"missing parameter":   {query: "", want: http.StatusForbidden},
+		"empty parameter":     {query: "?domain=", want: http.StatusForbidden},
+		"an IP address":       {query: "?domain=203.0.113.45", want: http.StatusForbidden},
+		"a wildcard":          {query: "?domain=*.example.com", want: http.StatusForbidden},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			rec := ts.do(t, http.MethodGet, "/internal/tls-check"+tt.query, "", nil)
+			assert.Equal(t, tt.want, rec.Code,
+				"every hostname approved here costs a rate-limited certificate order")
+		})
+	}
+}
+
+func TestTLSCheck_FailsClosedWhenTheLookupBreaks(t *testing.T) {
+	t.Parallel()
+
+	ts := newTestServer(t, func(d *Deps) {
+		d.Domains = stubDomains{err: errors.New("connection refused")}
+	})
+
+	rec := ts.do(t, http.MethodGet, "/internal/tls-check?domain=links.example.com", "", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code,
+		"a database outage must not become permission to request certificates")
+	assert.NotContains(t, rec.Body.String(), "connection refused")
 }

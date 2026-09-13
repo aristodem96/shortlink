@@ -144,6 +144,7 @@ chmod 600 .env
 
 ```bash
 SHORTLINK_DOMAIN=links.example.com     # bare hostname, no https://
+SERVER_IP=203.0.113.45                 # this server's public address
 POSTGRES_USER=shortlink
 POSTGRES_PASSWORD=<first generated value>
 POSTGRES_DB=shortlink
@@ -152,8 +153,19 @@ IP_HASH_SALT=<third>
 LOG_LEVEL=info
 ```
 
+`SERVER_IP` is what a customer's custom domain must resolve to before the bot
+accepts it — `curl -s ifconfig.me` prints it. Compose refuses to start without
+it, because an empty value would let anyone register a domain pointing anywhere.
+
 Do not change `IP_HASH_SALT` after the first start: rotating it invalidates every
 stored visitor hash, so unique-visitor counts restart from zero.
+
+If you are moving from a hostname whose links are already shared, keep serving
+it as well:
+
+```bash
+EXTRA_DOMAINS=old.example              # space-separated for several
+```
 
 ### 7. Start the stack
 
@@ -311,6 +323,55 @@ and `dcp up -d`. The log line from step 4 must now say `mainnet`.
 Before taking real money, check the legal side where you operate: selling a
 service is commercial activity, and in Ukraine that may mean registering as a
 sole proprietor (ФОП) for tax.
+
+---
+
+## Custom domains
+
+A buyer can pay a one-off `CUSTOM_DOMAIN_PRICE_USD` (default $5) and serve their
+links from a domain of their own. Nothing has to be provisioned per customer:
+Caddy obtains the certificate during the first TLS handshake for that hostname.
+
+What the customer does:
+
+1. `/buydomain` in the bot, and pay.
+2. Add a DNS `A` record for the hostname, pointing at `SERVER_IP`.
+3. `/adddomain links.acme.com`. The bot resolves it and refuses anything that
+   does not point here.
+
+Their next link comes back as `https://links.acme.com/abc1234`. Links made
+before that keep the hostname they were created with.
+
+### Checking it works
+
+The gate that decides whether a certificate may be requested is reachable only
+from inside the compose network:
+
+```bash
+# From outside it must be invisible.
+curl -s -o /dev/null -w '%{http_code}\n' https://links.example.com/internal/tls-check   # 404
+
+# From inside, a registered and paid-up domain is approved and anything else is not.
+docker compose exec api wget -qSO- "http://localhost:8080/internal/tls-check?domain=links.acme.com"
+```
+
+Then watch the certificate being issued the first time somebody opens the link:
+
+```bash
+docker compose logs -f caddy | grep -iE "obtain|on-demand"
+```
+
+### When a domain does not work
+
+| Symptom | Cause | Check |
+|---|---|---|
+| Bot says it does not point here | DNS not propagated | `dig +short links.acme.com` |
+| Browser shows a certificate error | the ask endpoint refused | `docker compose logs api \| grep tls-check` |
+| Link returns 404 on the right host | the link predates the domain | expected: old links keep their old hostname |
+| Every custom domain suddenly fails | Let's Encrypt rate limit | `docker compose logs caddy \| grep -i "rate limit"` |
+
+A domain stops serving when its owner's access lapses, and starts again when
+they renew. That is deliberate: the slot is theirs for good, the serving is not.
 
 ---
 
