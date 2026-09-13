@@ -143,6 +143,7 @@ chmod 600 .env
 ```
 
 ```bash
+COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml   # keep this line
 SHORTLINK_DOMAIN=links.example.com     # bare hostname, no https://
 SERVER_IP=203.0.113.45                 # this server's public address
 POSTGRES_USER=shortlink
@@ -170,7 +171,7 @@ EXTRA_DOMAINS=old.example              # space-separated for several
 ### 7. Start the stack
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+docker compose up -d --build
 ```
 
 The first build takes a few minutes. If a secret is missing, compose refuses to
@@ -179,14 +180,14 @@ start and names the variable.
 ### 8. Check that it came up
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
+docker compose ps
 ```
 
 All four services — `postgres`, `redis`, `api`, `caddy` — must show `running`.
 A service stuck in `created` did not start; read its logs.
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml logs caddy \
+docker compose logs caddy \
   | grep -i certificate
 ```
 
@@ -195,8 +196,7 @@ Wait for `certificate obtained successfully`. This can take up to a minute.
 ### 9. Issue an API key
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-  exec api /shortlinkctl issue-key -name production
+docker compose exec api /shortlinkctl issue-key -name production
 ```
 
 The secret is printed once and only its hash is stored, so save it now.
@@ -237,27 +237,35 @@ compose network or an SSH tunnel.
 
 ## Day-to-day
 
-A shell alias saves typing both compose files every time. Add to `~/.bashrc`:
+Every command below is a plain `docker compose`, because `COMPOSE_FILE` in
+`.env` already names both files. That is not only convenience: without it,
+`docker compose down` reads the base file alone, which does not contain `caddy`
+and keeps `bot` behind a profile — so it stops three services, leaves two
+running, and reports that the network is still in use. Setting it once makes
+that mistake impossible instead of merely discouraged.
+
+Check it is in effect before relying on it:
 
 ```bash
-alias dcp='docker compose -f docker-compose.yml -f docker-compose.prod.yml'
+cd /opt/shortlink
+docker compose config --services    # must list five, including caddy
 ```
 
 | Task | Command |
 |---|---|
-| Deploy a new version | `cd /opt/shortlink && git pull && dcp up -d --build` |
-| Follow the logs | `dcp logs -f api` |
-| Service status | `dcp ps` |
-| Issue a key | `dcp exec api /shortlinkctl issue-key -name <label>` |
-| Issue a time-limited key | `dcp exec api /shortlinkctl issue-key -name <label> -days 5` |
-| Open a database shell | `dcp exec postgres psql -U shortlink shortlink` |
-| Restart one service | `dcp restart api` |
-| Stop everything | `dcp down` |
+| Deploy a new version | `cd /opt/shortlink && git pull && docker compose up -d --build` |
+| Follow the logs | `docker compose logs -f api` |
+| Service status | `docker compose ps` |
+| Issue a key | `docker compose exec api /shortlinkctl issue-key -name <label>` |
+| Issue a time-limited key | `docker compose exec api /shortlinkctl issue-key -name <label> -days 5` |
+| Open a database shell | `docker compose exec postgres psql -U shortlink shortlink` |
+| Restart one service | `docker compose restart api` |
+| Stop everything | `docker compose down` |
 
 Migrations run automatically on start, so an upgrade is just `up -d --build`.
 The graceful shutdown flushes buffered clicks before the old container exits.
 
-> **Never run `dcp down -v` on the server.** The `-v` flag deletes the volumes,
+> **Never run `docker compose down -v` on the server.** The `-v` flag deletes the volumes,
 > and with them the entire database.
 
 ---
@@ -300,8 +308,8 @@ confirms slowly means the webhook is not configured, not that it failed.
 ### 4. Start and try it
 
 ```bash
-dcp up -d --build
-dcp logs bot | grep 'starting bot'     # confirms the network it is using
+docker compose up -d --build
+docker compose logs bot | grep 'starting bot'     # confirms the network it is using
 ```
 
 In Telegram: `/start`, `/buy`, pay in @CryptoTestnetBot, wait for "✅", then
@@ -318,7 +326,7 @@ CRYPTOPAY_TOKEN=<the mainnet app token>
 CRYPTOPAY_NETWORK=mainnet
 ```
 
-and `dcp up -d`. The log line from step 4 must now say `mainnet`.
+and `docker compose up -d`. The log line from step 4 must now say `mainnet`.
 
 Before taking real money, check the legal side where you operate: selling a
 service is commercial activity, and in Ukraine that may mean registering as a
@@ -382,19 +390,19 @@ The database lives in the `shortlink_pgdata` Docker volume, not in
 
 ```bash
 cd /opt/shortlink
-dcp exec -T postgres pg_dump -U shortlink shortlink | gzip > ~/backup-$(date +%F).sql.gz
+docker compose exec -T postgres pg_dump -U shortlink shortlink | gzip > ~/backup-$(date +%F).sql.gz
 ```
 
 A daily cron entry:
 
 ```cron
-0 3 * * * cd /opt/shortlink && docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T postgres pg_dump -U shortlink shortlink | gzip > ~/backups/shortlink-$(date +\%F).sql.gz
+0 3 * * * cd /opt/shortlink && docker compose exec -T postgres pg_dump -U shortlink shortlink | gzip > ~/backups/shortlink-$(date +\%F).sql.gz
 ```
 
 Restore into a running stack:
 
 ```bash
-gunzip -c backup-2026-09-07.sql.gz | dcp exec -T postgres psql -U shortlink shortlink
+gunzip -c backup-2026-09-07.sql.gz | docker compose exec -T postgres psql -U shortlink shortlink
 ```
 
 Copy the dumps off the server. A backup that lives only on the machine it
@@ -410,7 +418,7 @@ protects is not a backup.
 | compose refuses to start | a secret is empty in `.env` | it names the variable; fill it in |
 | Short links come back with `https://https://…` | `SHORTLINK_DOMAIN` includes the scheme | use the bare hostname |
 | Short links come back with `localhost` | `.env` missing or `SHORTLINK_DOMAIN` unset | check the file is in `/opt/shortlink` |
-| `api` stays in `created` | a published port is taken on the host | `dcp logs api`; nothing but Caddy should publish ports |
+| `api` stays in `created` | a published port is taken on the host | `docker compose logs api`; nothing but Caddy should publish ports |
 | Every click shows the same visitor | `TRUST_PROXY_HEADERS` is not set | the overlay sets it to `true`; confirm you passed both `-f` files |
 | `permission denied` from Docker | the group change has not applied | log out and back in after `usermod -aG docker` |
 | `password authentication failed for user "shortlink"` | the Postgres volume already exists from an earlier run with a different password | see below |
@@ -434,22 +442,23 @@ The error names authentication, never the volume, which is what makes it
 confusing. On a server that has no data worth keeping:
 
 ```bash
-dcp down -v          # deletes the volume, and with it the database
-dcp up -d --build
+docker compose down -v          # deletes the volume, and with it the database
+docker compose up -d --build
 ```
 
 If the database *does* hold data, change the password inside Postgres instead of
 deleting anything:
 
 ```bash
-dcp exec postgres psql -U shortlink -c "ALTER USER shortlink PASSWORD 'the new value';"
+docker compose exec postgres psql -U shortlink -c "ALTER USER shortlink PASSWORD 'the new value';"
 ```
 
-then put the same value in `.env` and `dcp up -d` to restart the api against it.
+then put the same value in `.env` and `docker compose up -d` to restart the api against it.
 
-The lesson for a first deployment: start with the production overlay from the
-beginning. Running the plain `docker compose up` once to test creates a volume
-with the development password baked in.
+The lesson for a first deployment: write `.env` — `COMPOSE_FILE` included —
+before starting anything. Bringing the stack up once with the base file alone,
+just to see whether it works, creates a volume with the development password
+baked into it, and the volume outlives the container that made it.
 
 ---
 
