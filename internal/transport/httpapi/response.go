@@ -12,7 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"shortlink/internal/domain"
+	"github.com/aristodem96/shortlink/internal/domain"
 )
 
 // errorResponse is the single error envelope of the API. Having exactly one

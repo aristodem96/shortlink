@@ -10,7 +10,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"shortlink/internal/domain"
+	"github.com/aristodem96/shortlink/internal/domain"
 )
 
 // missingSentinel marks a negatively cached code. It is not valid JSON, so it

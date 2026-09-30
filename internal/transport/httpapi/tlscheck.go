@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"shortlink/internal/domain"
+	"github.com/aristodem96/shortlink/internal/domain"
 )
 
 // tlsCheckHandler answers Caddy's on-demand TLS question: may this server

@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
-	"shortlink/migrations"
+	"github.com/aristodem96/shortlink/migrations"
 )
 
 // uniqueViolation is the SQLSTATE Postgres raises for a broken UNIQUE

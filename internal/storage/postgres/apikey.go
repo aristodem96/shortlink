@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"shortlink/internal/domain"
+	"github.com/aristodem96/shortlink/internal/domain"
 )
 
 // APIKeyRepository stores API keys in PostgreSQL. It satisfies

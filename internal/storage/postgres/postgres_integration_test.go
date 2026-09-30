@@ -17,7 +17,7 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	"shortlink/internal/domain"
+	"github.com/aristodem96/shortlink/internal/domain"
 )
 
 // These tests run against a real PostgreSQL in Docker rather than a mock,

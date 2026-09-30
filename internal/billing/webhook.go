@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"shortlink/internal/cryptopay"
+	"github.com/aristodem96/shortlink/internal/cryptopay"
 )
 
 // maxWebhookBody caps what is read before the signature is checked, so an

@@ -57,4 +57,4 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - shortlink
+        - github.com/aristodem96/shortlink

@@ -16,14 +16,14 @@ import (
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 
-	"shortlink/internal/analytics"
-	"shortlink/internal/config"
-	"shortlink/internal/observability"
-	"shortlink/internal/service"
-	"shortlink/internal/shortid"
-	"shortlink/internal/storage/postgres"
-	"shortlink/internal/storage/rediscache"
-	"shortlink/internal/transport/httpapi"
+	"github.com/aristodem96/shortlink/internal/analytics"
+	"github.com/aristodem96/shortlink/internal/config"
+	"github.com/aristodem96/shortlink/internal/observability"
+	"github.com/aristodem96/shortlink/internal/service"
+	"github.com/aristodem96/shortlink/internal/shortid"
+	"github.com/aristodem96/shortlink/internal/storage/postgres"
+	"github.com/aristodem96/shortlink/internal/storage/rediscache"
+	"github.com/aristodem96/shortlink/internal/transport/httpapi"
 )
 
 // version is stamped at build time with -ldflags "-X main.version=...".

@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"shortlink/internal/domain"
+	"github.com/aristodem96/shortlink/internal/domain"
 )
 
 // The doubles below are written by hand rather than generated.

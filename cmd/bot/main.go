@@ -22,17 +22,17 @@ import (
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 
-	"shortlink/internal/billing"
-	"shortlink/internal/bot"
-	"shortlink/internal/config"
-	"shortlink/internal/cryptopay"
-	"shortlink/internal/domain"
-	"shortlink/internal/observability"
-	"shortlink/internal/service"
-	"shortlink/internal/shortid"
-	"shortlink/internal/storage/postgres"
-	"shortlink/internal/storage/rediscache"
-	"shortlink/internal/telegram"
+	"github.com/aristodem96/shortlink/internal/billing"
+	"github.com/aristodem96/shortlink/internal/bot"
+	"github.com/aristodem96/shortlink/internal/config"
+	"github.com/aristodem96/shortlink/internal/cryptopay"
+	"github.com/aristodem96/shortlink/internal/domain"
+	"github.com/aristodem96/shortlink/internal/observability"
+	"github.com/aristodem96/shortlink/internal/service"
+	"github.com/aristodem96/shortlink/internal/shortid"
+	"github.com/aristodem96/shortlink/internal/storage/postgres"
+	"github.com/aristodem96/shortlink/internal/storage/rediscache"
+	"github.com/aristodem96/shortlink/internal/telegram"
 )
 
 func main() {

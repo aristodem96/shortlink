@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"shortlink/internal/domain"
+	"github.com/aristodem96/shortlink/internal/domain"
 )
 
 const (
