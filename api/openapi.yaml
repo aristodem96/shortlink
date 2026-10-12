@@ -7,7 +7,8 @@ info:
     A URL shortener with click analytics.
 
     Management endpoints under `/api/v1` require an API key issued by
-    `shortlinkctl issue-key`, sent as `Authorization: Bearer sl_...`.
+    `shortlinkctl issue-key` or by the Telegram bot's `/newkey`, sent as
+    `Authorization: Bearer sl_...`.
     The redirect endpoint is public.
   license:
     name: MIT
@@ -172,6 +173,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
 
   /healthz:
     get:
@@ -260,7 +262,9 @@ components:
     apiKey:
       type: http
       scheme: bearer
-      description: An API key issued by `shortlinkctl issue-key`, e.g. `sl_...`.
+      description: |
+        An API key issued by `shortlinkctl issue-key` or by the Telegram bot's
+        `/newkey`, e.g. `sl_...`.
 
   parameters:
     Code:
@@ -410,7 +414,7 @@ components:
               field: target_url
 
     Unauthorized:
-      description: The API key is missing, unknown or revoked
+      description: The API key is missing, unknown, revoked or expired
       headers:
         WWW-Authenticate:
           schema: { type: string }

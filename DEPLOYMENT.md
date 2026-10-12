@@ -99,7 +99,7 @@ PostgreSQL, Redis, or the API itself.
 ### 4. Put the source on the server
 
 The image is built on the server from source, so the whole checkout has to be
-there -- not just the compose files.
+there — not just the compose files.
 
 ```bash
 sudo mkdir -p /opt/shortlink
@@ -152,7 +152,14 @@ POSTGRES_DB=shortlink
 REDIS_PASSWORD=<second>
 IP_HASH_SALT=<third>
 LOG_LEVEL=info
+TELEGRAM_BOT_TOKEN=<from @BotFather>
+CRYPTOPAY_TOKEN=<from the Crypto Pay app>
+CRYPTOPAY_NETWORK=testnet              # testnet | mainnet, no default
 ```
+
+The bot is part of the production stack, so compose will not start without its
+three variables. Where the two tokens come from is covered in
+[The Telegram bot](#the-telegram-bot).
 
 `SERVER_IP` is what a customer's custom domain must resolve to before the bot
 accepts it — `curl -s ifconfig.me` prints it. Compose refuses to start without
@@ -183,7 +190,7 @@ start and names the variable.
 docker compose ps
 ```
 
-All four services — `postgres`, `redis`, `api`, `caddy` — must show `running`.
+All five services — `postgres`, `redis`, `api`, `bot`, `caddy` — must show `running`.
 A service stuck in `created` did not start; read its logs.
 
 ```bash
@@ -343,7 +350,7 @@ Caddy obtains the certificate during the first TLS handshake for that hostname.
 What the customer does:
 
 1. `/buydomain` in the bot, and pay.
-2. Add a DNS `A` record for the hostname, pointing at `SERVER_IP`.
+2. Add a DNS `A` (or `AAAA`) record for the hostname, pointing at `SERVER_IP`.
 3. `/adddomain links.acme.com`. The bot resolves it and refuses anything that
    does not point here.
 
@@ -360,7 +367,8 @@ from inside the compose network:
 curl -s -o /dev/null -w '%{http_code}\n' https://links.example.com/internal/tls-check   # 404
 
 # From inside, a registered and paid-up domain is approved and anything else is not.
-docker compose exec api wget -qSO- "http://localhost:8080/internal/tls-check?domain=links.acme.com"
+# The api image is distroless and has no wget, so ask from the caddy container.
+docker compose exec caddy wget -qSO- "http://api:8080/internal/tls-check?domain=links.acme.com"
 ```
 
 Then watch the certificate being issued the first time somebody opens the link:
@@ -419,7 +427,7 @@ protects is not a backup.
 | Short links come back with `https://https://…` | `SHORTLINK_DOMAIN` includes the scheme | use the bare hostname |
 | Short links come back with `localhost` | `.env` missing or `SHORTLINK_DOMAIN` unset | check the file is in `/opt/shortlink` |
 | `api` stays in `created` | a published port is taken on the host | `docker compose logs api`; nothing but Caddy should publish ports |
-| Every click shows the same visitor | `TRUST_PROXY_HEADERS` is not set | the overlay sets it to `true`; confirm you passed both `-f` files |
+| Every click shows the same visitor | `TRUST_PROXY_HEADERS` is not set | the overlay sets it to `true`; confirm `COMPOSE_FILE` is set in `.env` |
 | `permission denied` from Docker | the group change has not applied | log out and back in after `usermod -aG docker` |
 | `password authentication failed for user "shortlink"` | the Postgres volume already exists from an earlier run with a different password | see below |
 

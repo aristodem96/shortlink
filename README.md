@@ -3,9 +3,14 @@
 A URL shortener with click analytics, written in Go.
 
 It is a small service on purpose. The interesting part is not the feature list —
-shortening a URL is a `INSERT` and a `SELECT` — but what sits around it: a cache
+shortening a URL is an `INSERT` and a `SELECT` — but what sits around it: a cache
 that survives a stampede, analytics that never slow the redirect down, a rate
 limiter that stays correct under concurrency, and a shutdown that loses nothing.
+
+On top of the API, a Telegram bot sells time-limited access for crypto via
+[@CryptoBot](https://t.me/CryptoBot) and lets buyers mint keys, shorten links and read
+click stats without leaving the chat — see
+[Selling access through Telegram](#selling-access-through-telegram).
 
 ```
 POST /api/v1/links  {"target_url": "https://go.dev/blog/context"}
@@ -28,6 +33,7 @@ GET /i8zjvlJ
 - [Configuration](#configuration)
 - [Testing](#testing)
 - [Out of scope](#out-of-scope)
+- [Layout](#layout)
 
 ---
 
@@ -204,7 +210,7 @@ rejection sampling to remove the modulo bias a naive `b % 62` would introduce
 (the first eight characters of the alphabet would otherwise appear ~1.6x too
 often — there is a test for it).
 
-Random codes can collide, so `Create` retries up to three times on a unique
+Random codes can collide, so `Create` tries up to three times on a unique
 violation. With a 7-character code the keyspace is 62⁷ ≈ 3.5 × 10¹², so three
 consecutive collisions means something else is broken. Collisions are counted in
 `shortlink_code_collisions_total`; a rising rate is the signal to raise
@@ -575,7 +581,8 @@ the full list with defaults. Configuration is validated at startup and **all**
 problems are reported at once, so a misconfigured deployment does not fail one
 variable per restart.
 
-The only variable without a default is `IP_HASH_SALT`. Two more matter on a
+The only API variable without a default is `IP_HASH_SALT`; the bot also needs
+`TELEGRAM_BOT_TOKEN` and `CRYPTOPAY_TOKEN`, which have none. Two more matter on a
 public server: `SERVER_IP`, which is what a customer's domain must resolve to
 before it is accepted, and `CRYPTOPAY_NETWORK`, which the production overlay
 refuses to default either way.
@@ -587,11 +594,12 @@ refuses to default either way.
 ```bash
 make test              # unit tests only, no Docker needed
 make test-integration  # adds testcontainers-backed integration tests
-make cover             # HTML coverage report
+make cover             # HTML coverage report, unit tests only
 ```
 
-74.3% of statements overall; 79–100% in the packages that carry logic. The
-composition roots under `cmd/` are at zero on purpose: they are wiring, and the
+`make cover` measures the unit suite alone, so the storage packages, which are
+exercised only by the integration tests, show zero there; CI runs the full
+suite and reports its total coverage. The composition roots under `cmd/` are at zero on purpose: they are wiring, and the
 thing that proves them is the stack coming up, not a unit test.
 
 **Unit tests** use hand-written fakes rather than generated mocks. The ports are
@@ -629,8 +637,8 @@ oversight:
 - **No Kafka, no service mesh, no gRPC.** A single service with one database and
   one cache is the honest shape of this problem. Adding a broker to publish
   click events would be architecture as decoration.
-- **No QR codes, link editing, or a web UI.** More endpoints
-  in the same shape, no new engineering
+- **No QR codes, link editing, or a web UI.** More endpoints in the same shape,
+  no new engineering.
 - **No Grafana dashboards.** Metrics are exposed; wiring a dashboard is
   configuration, not code.
 
@@ -656,7 +664,7 @@ internal/telegram     minimal Bot API client
 internal/storage/     postgres (pgx) and rediscache (cache + Lua limiter)
 internal/transport/   HTTP routing, middleware, JSON mapping
 internal/shortid      random base62 code generation
-internal/config       environment configuration for both binaries
+internal/config       environment configuration for all three binaries
 internal/observability  slog setup and Prometheus metrics
 migrations            embedded SQL, applied on start
 api                   embedded OpenAPI spec
