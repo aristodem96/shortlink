@@ -207,7 +207,7 @@ The textbook shortener encodes an auto-incrementing ID in base62. That makes
 codes enumerable: anyone can count upwards and walk the entire corpus of links
 and their targets. `internal/shortid` draws from `crypto/rand` instead, with
 rejection sampling to remove the modulo bias a naive `b % 62` would introduce
-(the first eight characters of the alphabet would otherwise appear ~1.6x too
+(the first eight characters of the alphabet would otherwise appear ~1.25x too
 often — there is a test for it).
 
 Random codes can collide, so `Create` tries up to three times on a unique

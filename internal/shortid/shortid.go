@@ -23,7 +23,7 @@ const (
 
 	// maxUnbiased is the largest multiple of len(Alphabet) that fits in a byte.
 	// Rejecting bytes at or above it removes the modulo bias that a plain
-	// b % 62 would introduce for the first four characters of the alphabet.
+	// b % 62 would introduce for the first eight characters of the alphabet.
 	maxUnbiased = 256 - (256 % len(Alphabet)) // 248
 )
 

@@ -53,7 +53,7 @@ func TestGenerate_NoObviousCollisions(t *testing.T) {
 
 // TestGenerate_IsNotBiased is a coarse uniformity check. With rejection
 // sampling every character must appear roughly equally often; a naive
-// `b % 62` would over-represent the first eight characters by ~1.6x and blow
+// `b % 62` would over-represent the first eight characters by ~1.25x and blow
 // through this tolerance.
 func TestGenerate_IsNotBiased(t *testing.T) {
 	t.Parallel()
