@@ -629,8 +629,8 @@ oversight:
 - **No Kafka, no service mesh, no gRPC.** A single service with one database and
   one cache is the honest shape of this problem. Adding a broker to publish
   click events would be architecture as decoration.
-- **No custom domains, QR codes, link editing, or a web UI.** More endpoints
-  in the same shape, no new engineering.
+- **No QR codes, link editing, or a web UI.** More endpoints
+  in the same shape, no new engineering
 - **No Grafana dashboards.** Metrics are exposed; wiring a dashboard is
   configuration, not code.
 
